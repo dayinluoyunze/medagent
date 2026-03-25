@@ -1,0 +1,27 @@
+# 医药Agent依赖
+
+# 核心框架
+streamlit>=1.28.0
+langchain>=0.1.0
+langchain-core>=0.1.0
+
+# 大模型 SDK
+openai>=1.10.0
+
+# 向量存储与检索
+faiss-cpu>=1.7.0
+langchain-community>=0.0.10
+
+# 文本处理
+python-dotenv>=1.0.0
+tiktoken>=0.5.0
+
+# 扩展知识库格式
+python-docx>=1.1.0
+beautifulsoup4>=4.12.0
+
+# 中文处理（可选）
+jieba>=0.42.0
+
+# 测试
+pytest>=9.0.0

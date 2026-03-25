@@ -1,0 +1,13 @@
+{"id":"eval-001","question":"二甲双胍应该饭前吃还是饭后吃？","expected_keywords":["二甲双胍","餐中或餐后","随餐服用","胃肠道反应"],"expected_sources":["knowledge/drugs.md","knowledge/products.md"],"category":"dosage"}
+{"id":"eval-002","question":"二甲双胍可以长期服用吗？","expected_keywords":["二甲双胍","2型糖尿病","维生素B12","长期"],"expected_sources":["knowledge/qa.md","knowledge/products.md"],"category":"faq"}
+{"id":"eval-003","question":"忘记服药应该怎么处理？","expected_keywords":["漏服药物处理",">6小时","<6小时","不要一次服用双倍剂量"],"expected_sources":["knowledge/drugs.md","knowledge/qa.md"],"category":"medication_safety"}
+{"id":"eval-004","question":"哺乳期或者孕妇能用厄贝沙坦吗？","expected_keywords":["孕妇用药","ARBs类","厄贝沙坦","妊娠期妇女"],"expected_sources":["knowledge/drugs.md","knowledge/products.md"],"category":"special_population"}
+{"id":"eval-005","question":"厄贝沙坦适合什么病人？","expected_keywords":["厄贝沙坦片","原发性高血压","2型糖尿病肾病"],"expected_sources":["knowledge/products.md"],"category":"indication"}
+{"id":"eval-006","question":"厄贝沙坦怎么吃，一天几次？","expected_keywords":["起始剂量150mg","每日1次","空腹或餐后服用"],"expected_sources":["knowledge/products.md"],"category":"dosage"}
+{"id":"eval-007","question":"阿托伐他汀常见副作用有哪些？","expected_keywords":["阿托伐他汀","肌肉疼痛","肝功能异常","横纹肌溶解"],"expected_sources":["knowledge/products.md"],"category":"adverse_event"}
+{"id":"eval-008","question":"他汀类药物什么时候吃效果更好？","expected_keywords":["他汀类降脂药","夜间服用效果更好"],"expected_sources":["knowledge/drugs.md","knowledge/qa.md"],"category":"dosage_time"}
+{"id":"eval-009","question":"华法林和阿司匹林一起吃有什么风险？","expected_keywords":["华法林","阿司匹林","出血风险"],"expected_sources":["knowledge/drugs.md"],"category":"drug_interaction"}
+{"id":"eval-010","question":"葡萄柚汁会影响哪些药物？","expected_keywords":["葡萄柚汁","他汀类药物浓度"],"expected_sources":["knowledge/drugs.md"],"category":"food_interaction"}
+{"id":"eval-011","question":"老年人用药有什么通用注意事项？","expected_keywords":["最小有效剂量","不良反应","肝肾功能"],"expected_sources":["knowledge/drugs.md"],"category":"special_population"}
+{"id":"eval-012","question":"二甲双胍最常见的不良反应是什么？","expected_keywords":["胃肠道反应","恶心","腹泻","腹胀"],"expected_sources":["knowledge/products.md"],"category":"adverse_event"}
+

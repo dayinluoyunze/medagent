@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# Env files
+.env
+
+# Build and test artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# App runtime artifacts
+streamlit.out.log
+streamlit.err.log
+logs/
+
+# Local cache
+.cache/
+pytest-cache-files-*/
+
+# Vector index cache
+*.faiss
+*.pkl
+
+# Local memory and generated conversation data
+memory/conversation_history.md
+memory/conversation_summary.md
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tool state
+.claude/
