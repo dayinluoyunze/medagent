@@ -34,10 +34,31 @@ UPLOAD_SUBDIR = "uploads"
 UPLOADED_KNOWLEDGE_EXTENSIONS = tuple(
     sorted(SUPPORTED_KNOWLEDGE_EXTENSIONS - {".url", ".urls", ".webloc"})
 )
+TEXT_PREVIEW_EXTENSIONS = {
+    ".md",
+    ".txt",
+    ".text",
+    ".rst",
+    ".log",
+    ".json",
+    ".jsonl",
+    ".csv",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".html",
+    ".htm",
+}
+
+
+def _knowledge_root(knowledge_dir: str | Path = KNOWLEDGE_DIR) -> Path:
+    root = Path(knowledge_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _uploads_root(knowledge_dir: str | Path = KNOWLEDGE_DIR) -> Path:
-    root = Path(knowledge_dir).expanduser().resolve()
+    root = _knowledge_root(knowledge_dir)
     uploads = (root / UPLOAD_SUBDIR).resolve()
     uploads.relative_to(root)
     uploads.mkdir(parents=True, exist_ok=True)
@@ -347,3 +368,81 @@ def list_uploaded_knowledge(
             }
         )
     return items
+
+
+def list_knowledge_files(
+    *,
+    knowledge_dir: str | Path = KNOWLEDGE_DIR,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    root = _knowledge_root(knowledge_dir)
+    uploads = _uploads_root(root)
+    files = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_KNOWLEDGE_EXTENSIONS
+    ]
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+
+    items: list[dict[str, Any]] = []
+    for path in files[:limit]:
+        stat = path.stat()
+        relative_path = path.relative_to(root).as_posix()
+        is_uploaded = path.resolve().is_relative_to(uploads)
+        items.append(
+            {
+                "name": path.name,
+                "relative_path": relative_path,
+                "path": str(path),
+                "suffix": path.suffix.lower(),
+                "size": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "source": "网页添加" if is_uploaded else "项目内置",
+                "deletable": is_uploaded,
+            }
+        )
+    return items
+
+
+def resolve_knowledge_file(
+    relative_path: str,
+    *,
+    knowledge_dir: str | Path = KNOWLEDGE_DIR,
+) -> Path:
+    root = _knowledge_root(knowledge_dir)
+    candidate = (root / relative_path).resolve()
+    _ensure_inside(candidate, root)
+    if not candidate.exists() or not candidate.is_file():
+        raise FileNotFoundError("知识文件不存在")
+    if candidate.suffix.lower() not in SUPPORTED_KNOWLEDGE_EXTENSIONS:
+        raise ValueError("不支持的知识文件类型")
+    return candidate
+
+
+def read_knowledge_preview(
+    relative_path: str,
+    *,
+    knowledge_dir: str | Path = KNOWLEDGE_DIR,
+    max_chars: int = 1400,
+) -> str:
+    path = resolve_knowledge_file(relative_path, knowledge_dir=knowledge_dir)
+    if path.suffix.lower() not in TEXT_PREVIEW_EXTENSIONS:
+        return f"{path.name} 是二进制或需解析文件，暂不直接预览原文。"
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "\n..."
+    return text
+
+
+def delete_uploaded_knowledge(
+    relative_path: str,
+    *,
+    knowledge_dir: str | Path = KNOWLEDGE_DIR,
+) -> Path:
+    root = _knowledge_root(knowledge_dir)
+    uploads = _uploads_root(root)
+    path = resolve_knowledge_file(relative_path, knowledge_dir=root)
+    _ensure_inside(path, uploads)
+    path.unlink()
+    return path

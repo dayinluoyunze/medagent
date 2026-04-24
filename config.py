@@ -104,6 +104,7 @@ APP_CONFIG = {
     "ocr_dpi": int(os.getenv("OCR_DPI", "200")),
     "ocr_max_pages": int(os.getenv("OCR_MAX_PAGES", "20")),
     "tesseract_cmd": os.getenv("TESSERACT_CMD", ""),
+    "tessdata_prefix": os.getenv("TESSDATA_PREFIX", ""),
 }
 
 KNOWLEDGE_DIR = "knowledge"

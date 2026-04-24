@@ -6,6 +6,8 @@
 
 - `qa_dataset.jsonl`: 检索评测样本
 - `run_eval.py`: 离线评测脚本
+- `answer_dataset.jsonl`: 回答级评测样本
+- `run_answer_eval.py`: 回答级评测脚本，需要可用 LLM API Key
 
 ## 评测目标
 
@@ -31,16 +33,27 @@ python eval/run_eval.py
 python eval/run_eval.py --k 4 --dataset eval/qa_dataset.jsonl
 ```
 
+CI 中推荐带最低阈值运行：
+
+```bash
+python eval/run_eval.py --min-retrieval-hit-rate 0.6 --min-keyword-coverage-rate 0.4
+```
+
+回答级评测示例：
+
+```bash
+python eval/run_answer_eval.py --provider minimax --api-key your-minimax-key
+```
+
 ## 输出说明
 
 - `retrieval_hit_rate`: 至少命中一个期望关键词的比例
 - `source_hit_rate`: 期望来源文件命中的比例
 - `keyword_coverage_rate`: 所有期望关键词的整体覆盖率
+- 阈值参数不达标时脚本返回非零退出码，适合接入 CI
 
 ## 后续建议
 
-- 增加 answer-level 评测
 - 增加人工标注字段，如正确/部分正确/错误
 - 对比 `vector search` 与 `keyword fallback` 的差异
 - 记录不同 Provider 下的回答质量
-

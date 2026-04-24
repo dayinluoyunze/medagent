@@ -4,8 +4,11 @@ from pathlib import Path
 
 from rag.knowledge_manager import (
     UPLOADED_KNOWLEDGE_EXTENSIONS,
+    delete_uploaded_knowledge,
+    list_knowledge_files,
     list_uploaded_knowledge,
     parse_urls,
+    read_knowledge_preview,
     sanitize_filename,
     write_text_knowledge,
     write_url_knowledge,
@@ -87,6 +90,37 @@ class KnowledgeManagerTests(unittest.TestCase):
             self.assertEqual(len(files), 1)
             self.assertIn("name", files[0])
             self.assertIn("size", files[0])
+
+    def test_list_knowledge_files_marks_uploaded_files_deletable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "built-in.md").write_text("内置资料", encoding="utf-8")
+            uploaded = write_text_knowledge("用户资料", "网页添加内容", knowledge_dir=tmpdir)
+
+            files = list_knowledge_files(knowledge_dir=tmpdir)
+            by_relative_path = {item["relative_path"]: item for item in files}
+
+            self.assertFalse(by_relative_path["built-in.md"]["deletable"])
+            self.assertTrue(by_relative_path[uploaded.relative_to(root).as_posix()]["deletable"])
+
+    def test_read_preview_and_delete_uploaded_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = write_text_knowledge("用户资料", "可以删除的资料", knowledge_dir=tmpdir)
+            relative_path = path.relative_to(Path(tmpdir)).as_posix()
+
+            self.assertIn("可以删除", read_knowledge_preview(relative_path, knowledge_dir=tmpdir))
+            deleted_path = delete_uploaded_knowledge(relative_path, knowledge_dir=tmpdir)
+
+            self.assertEqual(deleted_path, path)
+            self.assertFalse(path.exists())
+
+    def test_delete_uploaded_knowledge_rejects_builtin_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "built-in.md"
+            path.write_text("内置资料", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                delete_uploaded_knowledge("built-in.md", knowledge_dir=tmpdir)
 
 
 if __name__ == "__main__":

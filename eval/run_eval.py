@@ -110,6 +110,29 @@ def main() -> int:
         default=4,
         help="Top-k documents to retrieve for each question.",
     )
+    parser.add_argument(
+        "--min-retrieval-hit-rate",
+        type=float,
+        default=0.0,
+        help="Fail if retrieval hit rate is below this threshold.",
+    )
+    parser.add_argument(
+        "--min-source-hit-rate",
+        type=float,
+        default=0.0,
+        help="Fail if source hit rate is below this threshold.",
+    )
+    parser.add_argument(
+        "--min-keyword-coverage-rate",
+        type=float,
+        default=0.0,
+        help="Fail if keyword coverage rate is below this threshold.",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Optional path to write JSON evaluation results.",
+    )
     args = parser.parse_args()
 
     dataset_path = ROOT / args.dataset
@@ -150,6 +173,35 @@ def main() -> int:
             f"keywords={item['keyword_hit_count']}/{item['keyword_total']}, "
             f"sources={item['source_hit_count']}/{item['source_total']}"
         )
+
+    if args.output:
+        output_path = ROOT / args.output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps({"summary": summary, "results": results}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    failures = []
+    if summary["retrieval_hit_rate"] < args.min_retrieval_hit_rate:
+        failures.append(
+            f"retrieval_hit_rate {summary['retrieval_hit_rate']:.2%} < {args.min_retrieval_hit_rate:.2%}"
+        )
+    if summary["source_hit_rate"] < args.min_source_hit_rate:
+        failures.append(
+            f"source_hit_rate {summary['source_hit_rate']:.2%} < {args.min_source_hit_rate:.2%}"
+        )
+    if summary["keyword_coverage_rate"] < args.min_keyword_coverage_rate:
+        failures.append(
+            f"keyword_coverage_rate {summary['keyword_coverage_rate']:.2%} < {args.min_keyword_coverage_rate:.2%}"
+        )
+
+    if failures:
+        print("")
+        print("Evaluation failed:")
+        for failure in failures:
+            print(f"- {failure}")
+        return 1
 
     return 0
 

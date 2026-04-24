@@ -1,6 +1,6 @@
-# MedAgent
+# MedAgent RAG Agent
 
-一个面向医药问答场景的智能 Agent Demo，支持多模型切换、知识库检索、长期记忆摘要，以及在模型或向量检索不可用时的本地回退。
+一个面向医药问答场景的 RAG Agent Demo，支持多模型切换、知识库检索、长期记忆摘要、资料上传管理、OCR 兜底，以及在模型或向量检索不可用时的本地回退。
 
 ## 项目定位
 
@@ -18,6 +18,7 @@
 - 多模型 Provider 切换：支持 `OpenAI`、`ModelScope`、`MiniMax`
 - 多源知识库接入：支持 `md`、`txt`、`json`、`csv`、`docx`、`pdf`、图片、`html`、网页 URL
 - 网页资料导入：在 UI 中粘贴 URL 后抓取正文或 PDF 文本，生成本地 Markdown 知识快照
+- 知识库管理：支持查看知识文件、预览文本资料、删除网页添加资料、手动重建索引
 - OCR 兜底：扫描版 PDF 和图片资料可通过 Tesseract OCR 抽取文本后入库
 - 检索模式：支持 `vector / hybrid / keyword`，只有 MiniMax API 也能运行
 - RAG 检索：优先使用 `FAISS + Embeddings`
@@ -27,6 +28,7 @@
 - 长期记忆：对历史对话进行 markdown 摘要并持久化
 - 故障兜底：模型调用失败时回退到本地知识库内容摘要
 - Web UI：基于 Streamlit 提供交互式问答界面
+- CI 验证：GitHub Actions 自动运行单元测试和离线检索评测
 
 ## 技术栈
 
@@ -68,7 +70,7 @@ User
   v
 Streamlit UI
   |
-  |-- Upload / URL Snapshot
+  |-- Upload / URL Snapshot / Knowledge Manager
   |
   v
 MedicalAgent
@@ -190,6 +192,7 @@ streamlit run app.py
 网页添加的资料会保存到 `knowledge/uploads/`，该目录默认不提交到 Git。
 URL 导入会拒绝本机、内网和非 `http(s)` 地址；如需限制可导入域名，可配置 `REMOTE_KNOWLEDGE_ALLOWLIST`。
 OCR 依赖本机 Tesseract 程序；如果 Windows 没有安装，可先安装 Tesseract，并在 `.env` 中配置 `TESSERACT_CMD`。
+侧边栏“查看当前状态”会显示 OCR 是否可用；侧边栏“知识库”可以预览资料、删除网页添加资料并手动重建索引。
 
 建议尝试以下问题：
 
@@ -203,6 +206,12 @@ OCR 依赖本机 Tesseract 程序；如果 Windows 没有安装，可先安装 T
 
 ```bash
 python eval/run_eval.py
+```
+
+也可以给评测设置最低阈值，适合放进 CI：
+
+```bash
+python eval/run_eval.py --min-retrieval-hit-rate 0.6 --min-keyword-coverage-rate 0.4
 ```
 
 当前脚本会读取 [eval/qa_dataset.jsonl](/e:/agent/medagent/eval/qa_dataset.jsonl) 中的样本，对检索结果做基础统计，包括：
@@ -233,6 +242,8 @@ pytest
 - markdown memory 持久化
 - 来源拼接
 - 检索回退逻辑
+- 知识库上传、预览和删除
+- OCR 状态检测与降级
 
 ## 日志与指标
 

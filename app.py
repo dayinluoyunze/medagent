@@ -23,11 +23,14 @@ from config import (
 )
 from rag.knowledge_manager import (
     UPLOADED_KNOWLEDGE_EXTENSIONS,
-    list_uploaded_knowledge,
+    delete_uploaded_knowledge,
+    list_knowledge_files,
+    read_knowledge_preview,
     write_text_knowledge,
     write_url_knowledge,
     write_uploaded_knowledge,
 )
+from rag.ocr import get_ocr_status
 
 
 load_dotenv()
@@ -259,6 +262,10 @@ def init_session_state() -> None:
         st.session_state.session_delete_confirm_id = ""
     if "knowledge_form_version" not in st.session_state:
         st.session_state.knowledge_form_version = 0
+    if "knowledge_preview_path" not in st.session_state:
+        st.session_state.knowledge_preview_path = ""
+    if "knowledge_delete_confirm_path" not in st.session_state:
+        st.session_state.knowledge_delete_confirm_path = ""
 
 
 def get_env_api_key(provider: str) -> str:
@@ -518,6 +525,49 @@ def refresh_retriever_after_knowledge_update(saved_count: int, errors: list[str]
     st.session_state.status_message = f"已保存 {saved_count} 个资料，并刷新知识库。{error_note}"
 
 
+def rebuild_retriever_action() -> None:
+    if not st.session_state.agent:
+        st.session_state.status_level = "warning"
+        st.session_state.status_message = "请先初始化 Agent，再重建知识索引。"
+        return
+
+    try:
+        st.session_state.agent.init_retriever()
+    except Exception as exc:
+        st.session_state.status_level = "error"
+        st.session_state.status_message = f"知识索引重建失败：{exc}"
+        return
+
+    retriever_error = getattr(st.session_state.agent, "retriever_error", "")
+    if retriever_error:
+        st.session_state.status_level = "warning"
+        st.session_state.status_message = f"索引已重建，但向量检索不可用，当前退回关键词检索：{retriever_error}"
+        return
+
+    st.session_state.status_level = "success"
+    st.session_state.status_message = "知识索引已重建。"
+
+
+def delete_knowledge_action(relative_path: str) -> None:
+    try:
+        deleted_path = delete_uploaded_knowledge(relative_path)
+    except Exception as exc:
+        st.session_state.status_level = "error"
+        st.session_state.status_message = f"删除资料失败：{exc}"
+        return
+
+    if st.session_state.knowledge_preview_path == relative_path:
+        st.session_state.knowledge_preview_path = ""
+    st.session_state.knowledge_delete_confirm_path = ""
+    if st.session_state.agent:
+        rebuild_retriever_action()
+        if st.session_state.status_level == "success":
+            st.session_state.status_message = f"已删除资料并重建索引：{deleted_path.name}"
+    else:
+        st.session_state.status_level = "success"
+        st.session_state.status_message = f"已删除资料：{deleted_path.name}。初始化 Agent 后会加载最新知识库。"
+
+
 def parse_session_timestamp(value: str) -> datetime | None:
     try:
         return datetime.fromisoformat(value)
@@ -644,7 +694,7 @@ def render_knowledge_manager() -> None:
     file_types = [suffix.lstrip(".") for suffix in UPLOADED_KNOWLEDGE_EXTENSIONS]
     version = st.session_state.knowledge_form_version
 
-    with st.expander("添加资料", expanded=False):
+    with st.expander("知识库", expanded=False):
         st.caption("上传文件或粘贴文本，保存后写入本地知识库并刷新 RAG。")
         uploaded_files = st.file_uploader(
             "上传资料文件",
@@ -710,13 +760,83 @@ def render_knowledge_manager() -> None:
                 st.session_state.knowledge_form_version += 1
             st.rerun()
 
-        recent_files = list_uploaded_knowledge()
-        if recent_files:
-            st.caption("最近添加")
-            for item in recent_files:
-                st.caption(
-                    f"{item['name']} · {format_file_size(item['size'])} · {item['modified_at']}"
-                )
+        st.divider()
+        manage_cols = st.columns(2, gap="small")
+        with manage_cols[0]:
+            if st.button("重建索引", use_container_width=True, key="rebuild_knowledge_index"):
+                rebuild_retriever_action()
+                st.rerun()
+        with manage_cols[1]:
+            if st.button("刷新列表", use_container_width=True, key="refresh_knowledge_files"):
+                st.rerun()
+
+        knowledge_files = list_knowledge_files(limit=80)
+        if not knowledge_files:
+            st.caption("知识库暂无可加载资料。")
+            return
+
+        uploaded_count = sum(1 for item in knowledge_files if item["deletable"])
+        st.caption(f"知识文件：{len(knowledge_files)} 个，其中网页添加 {uploaded_count} 个。")
+
+        options = [item["relative_path"] for item in knowledge_files]
+        selected_path = st.selectbox(
+            "选择资料",
+            options=options,
+            format_func=lambda value: next(
+                (
+                    f"{item['name']} · {item['source']} · {format_file_size(item['size'])}"
+                    for item in knowledge_files
+                    if item["relative_path"] == value
+                ),
+                value,
+            ),
+            key="knowledge_file_selector",
+        )
+        selected_item = next(
+            (item for item in knowledge_files if item["relative_path"] == selected_path),
+            None,
+        )
+        if not selected_item:
+            return
+
+        st.caption(
+            f"`{selected_item['relative_path']}` · {selected_item['modified_at']} · "
+            f"{'可删除' if selected_item['deletable'] else '内置资料'}"
+        )
+        file_cols = st.columns(2, gap="small")
+        with file_cols[0]:
+            if st.button("预览", use_container_width=True, key=f"preview_{abs(hash(selected_path))}"):
+                st.session_state.knowledge_preview_path = selected_path
+                st.session_state.knowledge_delete_confirm_path = ""
+                st.rerun()
+        with file_cols[1]:
+            if st.button(
+                "删除",
+                use_container_width=True,
+                disabled=not selected_item["deletable"],
+                key=f"delete_{abs(hash(selected_path))}",
+            ):
+                st.session_state.knowledge_delete_confirm_path = selected_path
+                st.session_state.knowledge_preview_path = ""
+                st.rerun()
+
+        if st.session_state.knowledge_preview_path == selected_path:
+            try:
+                st.code(read_knowledge_preview(selected_path), language="markdown")
+            except Exception as exc:
+                st.warning(f"预览失败：{exc}")
+
+        if st.session_state.knowledge_delete_confirm_path == selected_path:
+            st.warning("只允许删除网页上传/导入的资料，删除后会刷新索引。")
+            confirm_cols = st.columns(2, gap="small")
+            with confirm_cols[0]:
+                if st.button("确认删除", use_container_width=True, key=f"delete_confirm_{abs(hash(selected_path))}"):
+                    delete_knowledge_action(selected_path)
+                    st.rerun()
+            with confirm_cols[1]:
+                if st.button("取消", use_container_width=True, key=f"delete_cancel_{abs(hash(selected_path))}"):
+                    st.session_state.knowledge_delete_confirm_path = ""
+                    st.rerun()
 
 
 def render_sidebar(snapshot: dict[str, Any]) -> None:
@@ -754,12 +874,16 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
         show_status(st.session_state.status_message, st.session_state.status_level)
 
         with st.expander("查看当前状态", expanded=False):
+            ocr_status = get_ocr_status()
             st.caption(f"当前会话：`{snapshot['active_provider_label']}`")
             st.caption(f"当前模型：`{snapshot['active_model']}`")
             st.caption(f"当前标题：`{snapshot['current_session_title'] or '-'} `")
             st.caption(f"Embedding：`{EMBEDDING_PROVIDER}`")
             st.caption(f"检索模式：`{snapshot['actual_retrieval_mode']}`")
             st.caption(f"知识文档：`{snapshot['documents']}`")
+            st.caption(f"OCR：`{'可用' if ocr_status['available'] else '不可用'}`")
+            if not ocr_status["available"]:
+                st.caption(f"OCR 原因：`{ocr_status['reason']}`")
             st.caption(f"消息数量：`{snapshot['message_count']}`")
             st.caption(f"Key 来源：`{snapshot['selected_key_source']}`")
             if snapshot["retriever_error"]:
@@ -795,8 +919,8 @@ def render_header(snapshot: dict[str, Any]) -> None:
     st.markdown(
         f"""
 <div class="minimal-shell">
-  <div class="minimal-title">医药问答</div>
-  <p class="minimal-copy">把页面留给聊天。设置项放到左侧，状态收成轻量提示，不再占主屏。</p>
+  <div class="minimal-title">MedAgent RAG</div>
+  <p class="minimal-copy">面向医药问答的 RAG Agent。主屏保持聊天，知识库、会话和运行状态收在左侧。</p>
   <div class="status-strip">{pill_html}</div>
 </div>
         """,

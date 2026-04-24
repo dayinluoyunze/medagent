@@ -122,7 +122,12 @@ class RetrieverTests(unittest.TestCase):
         retriever.init_error = ""
         retriever.chunks = [Document(page_content="华法林 阿司匹林 出血风险", metadata={})]
 
-        docs = retriever.similarity_search("华法林 阿司匹林", k=1)
+        original_mode = APP_CONFIG["retrieval_mode"]
+        APP_CONFIG["retrieval_mode"] = "auto"
+        try:
+            docs = retriever.similarity_search("华法林 阿司匹林", k=1)
+        finally:
+            APP_CONFIG["retrieval_mode"] = original_mode
 
         self.assertEqual(len(docs), 1)
         self.assertIn("出血风险", docs[0].page_content)
