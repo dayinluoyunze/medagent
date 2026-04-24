@@ -30,9 +30,14 @@ pytest-cache-files-*/
 *.faiss
 *.pkl
 
+# User-uploaded knowledge from the web UI
+knowledge/uploads/
+
 # Local memory and generated conversation data
 memory/conversation_history.md
 memory/conversation_summary.md
+memory/current_session.json
+memory/sessions/
 
 # OS / editor noise
 .DS_Store

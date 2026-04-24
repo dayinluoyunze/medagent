@@ -1,15 +1,33 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit web app for the medical agent.
+Minimal Streamlit web app for the medical agent.
 """
 
+import json
 import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
 
 from agents.medical_agent import create_agent
-from config import APP_CONFIG, DEFAULT_PROVIDER, EMBEDDING_PROVIDER
+from config import (
+    APP_CONFIG,
+    CHAT_METRICS_FILENAME,
+    DEFAULT_PROVIDER,
+    EMBEDDING_PROVIDER,
+    LOG_DIR,
+    get_provider_config,
+)
+from rag.knowledge_manager import (
+    UPLOADED_KNOWLEDGE_EXTENSIONS,
+    list_uploaded_knowledge,
+    write_text_knowledge,
+    write_url_knowledge,
+    write_uploaded_knowledge,
+)
 
 
 load_dotenv()
@@ -19,6 +37,201 @@ st.set_page_config(
     page_icon="💊",
     layout="wide",
 )
+
+PROVIDER_LABELS = {
+    "openai": "OpenAI",
+    "modelscope": "ModelScope",
+    "minimax": "MiniMax",
+}
+
+EXAMPLE_PROMPTS = [
+    "二甲双胍应该饭前吃还是饭后吃？",
+    "忘记服用降压药时应该怎么处理？",
+    "阿莫西林常见的不良反应有哪些？",
+    "哺乳期使用感冒药需要注意什么？",
+]
+
+
+def inject_styles() -> None:
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap');
+
+:root {
+    --bg: #f6f3ed;
+    --bg-soft: #f1efe8;
+    --panel: rgba(255, 252, 247, 0.92);
+    --ink: #162228;
+    --muted: #63727a;
+    --line: rgba(22, 34, 40, 0.10);
+    --accent: #0f6a63;
+    --accent-soft: rgba(15, 106, 99, 0.10);
+    --shadow: 0 16px 40px rgba(18, 34, 40, 0.06);
+}
+
+html, body, [class*="css"] {
+    font-family: "Space Grotesk", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.stApp {
+    background:
+        radial-gradient(circle at top left, rgba(15, 106, 99, 0.10), transparent 24%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%);
+    color: var(--ink);
+}
+
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+[data-testid="stAppViewContainer"] > .main {
+    background: transparent;
+}
+
+.block-container {
+    max-width: 980px;
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+}
+
+section[data-testid="stSidebar"] {
+    background: rgba(248, 245, 239, 0.92);
+    border-right: 1px solid rgba(22, 34, 40, 0.08);
+}
+
+.minimal-shell {
+    margin-bottom: 0.95rem;
+}
+
+.minimal-title {
+    margin: 0 0 0.22rem;
+    font-size: clamp(1.8rem, 2.6vw, 2.4rem);
+    line-height: 1.06;
+    letter-spacing: -0.04em;
+    font-weight: 700;
+}
+
+.minimal-copy {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+    line-height: 1.7;
+}
+
+.status-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin-top: 0.85rem;
+}
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.5rem 0.74rem;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    color: var(--ink);
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.starter-card {
+    padding: 1rem 1.05rem;
+    border-radius: 18px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    color: var(--muted);
+    line-height: 1.72;
+    margin-bottom: 0.9rem;
+}
+
+.starter-card strong {
+    color: var(--ink);
+}
+
+.section-caption {
+    margin: 0 0 0.7rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+[data-testid="stChatMessage"] {
+    background: rgba(255, 252, 247, 0.97);
+    border-radius: 20px;
+    border: 1px solid var(--line);
+    box-shadow: 0 12px 28px rgba(18, 34, 40, 0.05);
+    padding: 0.35rem 0.55rem;
+    margin-bottom: 0.8rem;
+}
+
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li {
+    font-size: 0.97rem;
+    line-height: 1.8;
+}
+
+[data-testid="stChatInput"] {
+    background: rgba(255, 252, 247, 0.98);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 16px 34px rgba(18, 34, 40, 0.08);
+}
+
+[data-testid="stChatInput"] textarea {
+    font-size: 0.98rem !important;
+}
+
+.stButton button {
+    border-radius: 14px;
+    border: 1px solid rgba(22, 34, 40, 0.08);
+    background: linear-gradient(135deg, var(--accent) 0%, #114d64 100%);
+    color: #ffffff;
+    font-weight: 700;
+    box-shadow: 0 10px 22px rgba(15, 106, 99, 0.14);
+}
+
+.stButton button[kind="secondary"] {
+    background: rgba(255, 252, 247, 0.96);
+    color: var(--ink);
+    box-shadow: none;
+}
+
+[data-baseweb="select"] > div,
+.stTextInput input {
+    border-radius: 14px !important;
+}
+
+.sidebar-title {
+    margin: 0 0 0.35rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.sidebar-copy {
+    margin: 0 0 0.85rem;
+    color: var(--muted);
+    font-size: 0.88rem;
+    line-height: 1.65;
+}
+
+@media (max-width: 768px) {
+    .block-container {
+        padding-top: 0.8rem;
+    }
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def init_session_state() -> None:
@@ -36,6 +249,16 @@ def init_session_state() -> None:
         st.session_state.manual_api_keys = {}
     if "api_key_inputs" not in st.session_state:
         st.session_state.api_key_inputs = {}
+    if "pending_prompt" not in st.session_state:
+        st.session_state.pending_prompt = ""
+    if "session_editor_id" not in st.session_state:
+        st.session_state.session_editor_id = ""
+    if "session_editor_title" not in st.session_state:
+        st.session_state.session_editor_title = ""
+    if "session_delete_confirm_id" not in st.session_state:
+        st.session_state.session_delete_confirm_id = ""
+    if "knowledge_form_version" not in st.session_state:
+        st.session_state.knowledge_form_version = 0
 
 
 def get_env_api_key(provider: str) -> str:
@@ -48,10 +271,6 @@ def get_env_api_key(provider: str) -> str:
     return ""
 
 
-def get_active_api_key(provider: str) -> str:
-    return st.session_state.manual_api_keys.get(provider, get_env_api_key(provider))
-
-
 def get_api_key_input(provider: str) -> str:
     return st.session_state.api_key_inputs.get(provider, "")
 
@@ -60,38 +279,116 @@ def set_api_key_input(provider: str, value: str) -> None:
     st.session_state.api_key_inputs[provider] = value
 
 
-def init_agent(provider: str, api_key_input: str) -> bool:
-    api_key = api_key_input.strip() or get_env_api_key(provider)
-    if not api_key:
-        st.session_state.status_level = "error"
-        st.session_state.status_message = "请输入当前 provider 对应的 API Key，或先在 .env 中配置。"
-        return False
+def provider_label(provider: str | None) -> str:
+    if not provider:
+        return "未初始化"
+    return PROVIDER_LABELS.get(provider, provider)
+
+
+def current_key_source(provider: str, api_key_input: str) -> str:
+    if api_key_input.strip():
+        return "手动输入"
+    if get_env_api_key(provider):
+        return ".env"
+    return "缺失"
+
+
+def copy_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [{"role": item["role"], "content": item["content"]} for item in messages]
+
+
+def latest_metrics() -> dict[str, Any] | None:
+    metrics_path = Path(LOG_DIR) / CHAT_METRICS_FILENAME
+    if not metrics_path.exists():
+        return None
 
     try:
-        if api_key_input.strip():
-            st.session_state.manual_api_keys[provider] = api_key_input.strip()
-        st.session_state.agent = create_agent(provider, api_key)
-        st.session_state.provider = provider
+        lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
 
-        retriever_error = getattr(st.session_state.agent, "retriever_error", "")
-        if retriever_error:
-            st.session_state.status_level = "warning"
-            st.session_state.status_message = (
-                "Agent 已初始化，但向量检索不可用，当前将退回为本地关键词检索。\n\n"
-                f"原因：{retriever_error}"
-            )
-        else:
-            st.session_state.status_level = "success"
-            st.session_state.status_message = "Agent 初始化成功，知识库检索已启用。"
-        return True
-    except Exception as exc:
-        st.session_state.status_level = "error"
-        st.session_state.status_message = f"初始化失败：{exc}"
-        return False
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
-def display_message(role: str, content: str) -> None:
-    st.chat_message(role).write(content)
+def reset_session_action_state() -> None:
+    st.session_state.session_editor_id = ""
+    st.session_state.session_editor_title = ""
+    st.session_state.session_delete_confirm_id = ""
+
+
+def get_runtime_snapshot() -> dict[str, Any]:
+    agent = st.session_state.agent
+    selected_provider = st.session_state.provider
+    selected_provider_config = get_provider_config(selected_provider)
+
+    snapshot: dict[str, Any] = {
+        "selected_provider": selected_provider,
+        "selected_provider_label": provider_label(selected_provider),
+        "selected_model": selected_provider_config["model"],
+        "selected_key_source": current_key_source(selected_provider, get_api_key_input(selected_provider)),
+        "active_provider": None,
+        "active_provider_label": "未初始化",
+        "active_model": "-",
+        "actual_retrieval_mode": "未初始化",
+        "vector_ready": False,
+        "retriever_error": "",
+        "documents": 0,
+        "message_count": 0,
+        "memory_enabled": APP_CONFIG["memory_enabled"],
+        "summary_present": False,
+        "current_session_id": "",
+        "current_session_title": "",
+        "sessions_count": 0,
+    }
+
+    if agent is None:
+        return snapshot
+
+    snapshot["active_provider"] = agent.provider
+    snapshot["active_provider_label"] = provider_label(agent.provider)
+    snapshot["active_model"] = agent.provider_config["model"]
+    snapshot["message_count"] = len(agent.conversation_history)
+    snapshot["summary_present"] = bool(agent.summary_memory.strip())
+    session_meta = agent.get_session_meta()
+    snapshot["current_session_id"] = session_meta["session_id"]
+    snapshot["current_session_title"] = session_meta["title"]
+    snapshot["sessions_count"] = len(agent.list_sessions())
+
+    retriever = agent.retriever
+    if retriever is None:
+        snapshot["retriever_error"] = getattr(agent, "retriever_error", "")
+        return snapshot
+
+    snapshot["documents"] = len(retriever.documents)
+    snapshot["vector_ready"] = bool(retriever.vectorstore)
+    snapshot["retriever_error"] = retriever.init_error or getattr(agent, "retriever_error", "")
+
+    mode = APP_CONFIG["retrieval_mode"].lower()
+    if EMBEDDING_PROVIDER == "none" or not snapshot["vector_ready"]:
+        snapshot["actual_retrieval_mode"] = "keyword"
+    elif mode in {"auto", "hybrid"}:
+        snapshot["actual_retrieval_mode"] = "hybrid rerank"
+    elif mode == "vector":
+        snapshot["actual_retrieval_mode"] = "vector"
+    else:
+        snapshot["actual_retrieval_mode"] = "vector + fallback"
+
+    return snapshot
+
+
+def sync_messages_from_agent() -> None:
+    if st.session_state.agent is None:
+        st.session_state.messages = []
+        return
+    st.session_state.messages = copy_history(st.session_state.agent.get_history())
 
 
 def show_status(message: str, level: str) -> None:
@@ -107,113 +404,492 @@ def show_status(message: str, level: str) -> None:
         st.info(message)
 
 
-def main() -> None:
-    init_session_state()
+def init_agent(provider: str, api_key_input: str) -> bool:
+    api_key = api_key_input.strip() or get_env_api_key(provider)
+    if not api_key:
+        st.session_state.status_level = "error"
+        st.session_state.status_message = "缺少当前 provider 的 API Key。请手动输入，或先在 .env 里配置。"
+        return False
 
-    st.title(f"💊 {APP_CONFIG['title']}")
-    st.markdown(f"*{APP_CONFIG['description']}*")
+    try:
+        if api_key_input.strip():
+            st.session_state.manual_api_keys[provider] = api_key_input.strip()
+        st.session_state.agent = create_agent(provider, api_key)
+        st.session_state.provider = provider
+        sync_messages_from_agent()
+        reset_session_action_state()
 
+        retriever_error = getattr(st.session_state.agent, "retriever_error", "")
+        if retriever_error:
+            st.session_state.status_level = "warning"
+            st.session_state.status_message = (
+                "Agent 已初始化，但向量检索不可用，当前会退回本地关键词检索。\n\n"
+                f"原因：{retriever_error}"
+            )
+        else:
+            st.session_state.status_level = "success"
+            st.session_state.status_message = "Agent 初始化完成，可以直接开始提问。"
+        return True
+    except Exception as exc:
+        st.session_state.status_level = "error"
+        st.session_state.status_message = f"初始化失败：{exc}"
+        return False
+
+
+def clear_session_and_memory() -> None:
+    if st.session_state.agent:
+        st.session_state.agent.start_new_session()
+        sync_messages_from_agent()
+    else:
+        st.session_state.messages = []
+    st.session_state.pending_prompt = ""
+    reset_session_action_state()
+    st.session_state.status_level = "success"
+    st.session_state.status_message = "已创建新会话，历史会话仍保留在本地。"
+
+
+def load_session_into_agent(session_id: str) -> None:
+    if not st.session_state.agent:
+        return
+    st.session_state.agent.load_session(session_id)
+    sync_messages_from_agent()
+    reset_session_action_state()
+    st.session_state.status_level = "success"
+    st.session_state.status_message = f"已切换到历史会话：{st.session_state.agent.current_session_title}"
+
+
+def rename_session_in_agent(session_id: str, title: str) -> None:
+    if not st.session_state.agent:
+        return
+    st.session_state.agent.rename_session(session_id, title)
+    sync_messages_from_agent()
+    reset_session_action_state()
+    st.session_state.status_level = "success"
+    st.session_state.status_message = "会话标题已更新。"
+
+
+def delete_session_in_agent(session_id: str) -> None:
+    if not st.session_state.agent:
+        return
+    st.session_state.agent.delete_session(session_id)
+    sync_messages_from_agent()
+    reset_session_action_state()
+    st.session_state.status_level = "success"
+    st.session_state.status_message = "历史会话已删除。"
+
+
+def format_file_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def refresh_retriever_after_knowledge_update(saved_count: int, errors: list[str]) -> None:
+    error_note = ""
+    if errors:
+        error_note = "\n\n部分资料保存失败：" + "；".join(errors[:3])
+
+    if not st.session_state.agent:
+        st.session_state.status_level = "warning" if errors else "success"
+        st.session_state.status_message = (
+            f"已保存 {saved_count} 个资料。初始化 Agent 后会自动加载新资料。{error_note}"
+        )
+        return
+
+    try:
+        st.session_state.agent.init_retriever()
+    except Exception as exc:
+        st.session_state.status_level = "error"
+        st.session_state.status_message = f"资料已保存，但刷新知识库失败：{exc}{error_note}"
+        return
+
+    retriever_error = getattr(st.session_state.agent, "retriever_error", "")
+    if retriever_error:
+        st.session_state.status_level = "warning"
+        st.session_state.status_message = (
+            f"已保存 {saved_count} 个资料，但向量检索刷新异常，当前会退回关键词检索。\n\n"
+            f"原因：{retriever_error}{error_note}"
+        )
+        return
+
+    st.session_state.status_level = "warning" if errors else "success"
+    st.session_state.status_message = f"已保存 {saved_count} 个资料，并刷新知识库。{error_note}"
+
+
+def parse_session_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def group_sessions_by_date(sessions: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    today = datetime.now().date()
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "今天": [],
+        "昨天": [],
+        "更早": [],
+        "无时间": [],
+    }
+
+    for item in sessions:
+        dt = parse_session_timestamp(str(item.get("updated_at", "")))
+        if dt is None:
+            grouped["无时间"].append(item)
+            continue
+        days = (today - dt.date()).days
+        if days == 0:
+            grouped["今天"].append(item)
+        elif days == 1:
+            grouped["昨天"].append(item)
+        else:
+            grouped["更早"].append(item)
+
+    return [(label, items) for label, items in grouped.items() if items]
+
+
+def format_session_button_label(item: dict[str, Any], *, is_current: bool) -> str:
+    title = str(item.get("title", "未命名会话")).strip() or "未命名会话"
+    dt = parse_session_timestamp(str(item.get("updated_at", "")))
+    time_text = dt.strftime("%H:%M") if dt else "--:--"
+    count = item.get("message_count", 0)
+    suffix = " · 当前" if is_current else ""
+    return f"{title} · {time_text} · {count}条{suffix}"
+
+
+def render_session_editor(item: dict[str, Any]) -> None:
+    session_id = item["session_id"]
+    input_key = f"rename_input_{session_id}"
+    default_value = st.session_state.session_editor_title or str(item.get("title", ""))
+    title_value = st.text_input(
+        "重命名会话",
+        value=default_value,
+        key=input_key,
+        label_visibility="collapsed",
+        placeholder="输入新的会话标题",
+    )
+    st.session_state.session_editor_title = title_value
+    save_col, cancel_col = st.columns(2, gap="small")
+    with save_col:
+        if st.button("保存", key=f"rename_save_{session_id}", use_container_width=True):
+            rename_session_in_agent(session_id, title_value)
+            st.rerun()
+    with cancel_col:
+        if st.button("取消", key=f"rename_cancel_{session_id}", use_container_width=True):
+            reset_session_action_state()
+            st.rerun()
+
+
+def render_session_delete_confirm(item: dict[str, Any]) -> None:
+    session_id = item["session_id"]
+    st.caption("删除后无法恢复。")
+    confirm_col, cancel_col = st.columns(2, gap="small")
+    with confirm_col:
+        if st.button("确认删除", key=f"delete_confirm_{session_id}", use_container_width=True):
+            delete_session_in_agent(session_id)
+            st.rerun()
+    with cancel_col:
+        if st.button("取消", key=f"delete_cancel_{session_id}", use_container_width=True):
+            reset_session_action_state()
+            st.rerun()
+
+
+def render_session_history(snapshot: dict[str, Any]) -> None:
+    if not st.session_state.agent or not APP_CONFIG["memory_enabled"]:
+        return
+
+    sessions = st.session_state.agent.list_sessions()
+    if not sessions:
+        return
+
+    current_session_id = snapshot["current_session_id"]
+    with st.expander(f"历史会话 ({len(sessions)})", expanded=False):
+        for group_label, group_items in group_sessions_by_date(sessions):
+            st.caption(group_label)
+            for item in group_items:
+                session_id = item["session_id"]
+                is_current = session_id == current_session_id
+                row_cols = st.columns([4.8, 1.2, 1.2], gap="small")
+                with row_cols[0]:
+                    if st.button(
+                        format_session_button_label(item, is_current=is_current),
+                        key=f"session_open_{session_id}",
+                        use_container_width=True,
+                        type="primary" if is_current else "secondary",
+                    ):
+                        load_session_into_agent(session_id)
+                        st.rerun()
+                with row_cols[1]:
+                    if st.button("改名", key=f"session_rename_{session_id}", use_container_width=True):
+                        st.session_state.session_editor_id = session_id
+                        st.session_state.session_editor_title = str(item.get("title", ""))
+                        st.session_state.session_delete_confirm_id = ""
+                        st.rerun()
+                with row_cols[2]:
+                    if st.button("删除", key=f"session_delete_{session_id}", use_container_width=True):
+                        st.session_state.session_delete_confirm_id = session_id
+                        st.session_state.session_editor_id = ""
+                        st.session_state.session_editor_title = ""
+                        st.rerun()
+
+                if st.session_state.session_editor_id == session_id:
+                    render_session_editor(item)
+                elif st.session_state.session_delete_confirm_id == session_id:
+                    render_session_delete_confirm(item)
+
+
+def render_knowledge_manager() -> None:
+    file_types = [suffix.lstrip(".") for suffix in UPLOADED_KNOWLEDGE_EXTENSIONS]
+    version = st.session_state.knowledge_form_version
+
+    with st.expander("添加资料", expanded=False):
+        st.caption("上传文件或粘贴文本，保存后写入本地知识库并刷新 RAG。")
+        uploaded_files = st.file_uploader(
+            "上传资料文件",
+            type=file_types,
+            accept_multiple_files=True,
+            key=f"knowledge_files_{version}",
+            help="支持 md、txt、json、jsonl、csv、docx、pdf、图片、html、xml、yaml 等可解析文件。扫描版 PDF 和图片需要本机 OCR 环境。",
+        )
+        text_title = st.text_input(
+            "资料标题",
+            key=f"knowledge_title_{version}",
+            placeholder="例如：高血压用药注意事项",
+        )
+        url_content = st.text_area(
+            "从 URL 导入",
+            key=f"knowledge_urls_{version}",
+            placeholder="每行一个 URL，保存后会抓取网页正文并生成本地知识快照。",
+            height=82,
+        )
+        text_content = st.text_area(
+            "粘贴文本",
+            key=f"knowledge_text_{version}",
+            placeholder="可以粘贴说明书片段、指南摘要、内部 FAQ 等文本资料。",
+            height=110,
+        )
+
+        if st.button("保存并刷新知识库", use_container_width=True, key=f"save_knowledge_{version}"):
+            saved_paths: list[Path] = []
+            errors: list[str] = []
+
+            for uploaded_file in uploaded_files or []:
+                try:
+                    saved_paths.append(
+                        write_uploaded_knowledge(uploaded_file.name, uploaded_file.getvalue())
+                    )
+                except Exception as exc:
+                    errors.append(f"{uploaded_file.name}: {exc}")
+
+            if text_content.strip():
+                try:
+                    saved_paths.append(write_text_knowledge(text_title, text_content))
+                except Exception as exc:
+                    errors.append(f"文本资料: {exc}")
+
+            if url_content.strip():
+                with st.spinner("正在抓取 URL 并生成知识快照..."):
+                    url_paths, url_errors = write_url_knowledge(url_content, text_title)
+                saved_paths.extend(url_paths)
+                errors.extend(url_errors)
+
+            if not saved_paths and not errors:
+                st.session_state.status_level = "warning"
+                st.session_state.status_message = "请先上传文件、粘贴文本，或输入 URL。"
+                st.rerun()
+
+            if not saved_paths:
+                st.session_state.status_level = "error"
+                st.session_state.status_message = "资料保存失败：" + "；".join(errors[:3])
+                st.rerun()
+
+            refresh_retriever_after_knowledge_update(len(saved_paths), errors)
+            if saved_paths:
+                st.session_state.knowledge_form_version += 1
+            st.rerun()
+
+        recent_files = list_uploaded_knowledge()
+        if recent_files:
+            st.caption("最近添加")
+            for item in recent_files:
+                st.caption(
+                    f"{item['name']} · {format_file_size(item['size'])} · {item['modified_at']}"
+                )
+
+
+def render_sidebar(snapshot: dict[str, Any]) -> None:
     with st.sidebar:
-        st.header("配置")
+        st.markdown('<div class="sidebar-title">Session</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="sidebar-copy">所有控制项都收在这里，主屏只保留聊天。</p>',
+            unsafe_allow_html=True,
+        )
 
-        provider = st.selectbox(
-            "选择模型",
+        selected_provider = st.selectbox(
+            "聊天模型",
             options=["openai", "modelscope", "minimax"],
             index=["openai", "modelscope", "minimax"].index(st.session_state.provider),
-            format_func=lambda value: {
-                "openai": "OpenAI",
-                "modelscope": "ModelScope",
-                "minimax": "MiniMax",
-            }[value],
+            format_func=lambda value: PROVIDER_LABELS[value],
         )
+        st.session_state.provider = selected_provider
 
         api_key_input = st.text_input(
             "API Key",
             type="password",
-            value=get_api_key_input(provider),
-            help="输入后仅在当前会话使用；如果留空，则回退到 .env 中的 key。",
+            value=get_api_key_input(selected_provider),
+            help="留空则回退到 .env 中当前 provider 对应的 key。",
         )
-        set_api_key_input(provider, api_key_input)
+        set_api_key_input(selected_provider, api_key_input)
 
-        env_configured = bool(get_env_api_key(provider))
-        manual_configured = provider in st.session_state.manual_api_keys
+        action_cols = st.columns(2, gap="small")
+        with action_cols[0]:
+            if st.button("初始化", type="primary", use_container_width=True):
+                init_agent(selected_provider, api_key_input)
+        with action_cols[1]:
+            if st.button("新建会话", use_container_width=True):
+                clear_session_and_memory()
 
-        st.caption(f"当前聊天 provider：`{provider}`")
-        st.caption(f"当前 embedding provider：`{EMBEDDING_PROVIDER}`")
-        st.caption(f".env key 状态：`{'已配置' if env_configured else '未配置'}`")
-        st.caption(f"手动 key 状态：`{'已输入并生效' if manual_configured else '未输入'}`")
+        show_status(st.session_state.status_message, st.session_state.status_level)
 
-        if st.button("初始化 Agent", type="primary", use_container_width=True):
-            init_agent(provider, api_key_input)
+        with st.expander("查看当前状态", expanded=False):
+            st.caption(f"当前会话：`{snapshot['active_provider_label']}`")
+            st.caption(f"当前模型：`{snapshot['active_model']}`")
+            st.caption(f"当前标题：`{snapshot['current_session_title'] or '-'} `")
+            st.caption(f"Embedding：`{EMBEDDING_PROVIDER}`")
+            st.caption(f"检索模式：`{snapshot['actual_retrieval_mode']}`")
+            st.caption(f"知识文档：`{snapshot['documents']}`")
+            st.caption(f"消息数量：`{snapshot['message_count']}`")
+            st.caption(f"Key 来源：`{snapshot['selected_key_source']}`")
+            if snapshot["retriever_error"]:
+                st.warning(snapshot["retriever_error"])
 
-        show_status(
-            st.session_state.status_message,
-            st.session_state.status_level,
-        )
+        render_knowledge_manager()
 
-        st.divider()
+        if st.session_state.agent and APP_CONFIG["memory_enabled"]:
+            render_session_history(snapshot)
 
-        if st.button("清空对话历史", use_container_width=True):
-            if st.session_state.agent:
-                st.session_state.agent.clear_history()
-            st.session_state.messages = []
-            st.rerun()
+        metrics = latest_metrics()
+        if metrics:
+            with st.expander("最近一次调用", expanded=False):
+                st.caption(f"状态：`{metrics.get('status', '-')}`")
+                st.caption(f"耗时：`{metrics.get('duration_ms', 0)} ms`")
+                st.caption(f"命中文档：`{metrics.get('retrieved_doc_count', 0)}`")
+                st.caption(f"Fallback：`{'yes' if metrics.get('fallback_used') else 'no'}`")
 
-        st.divider()
 
-        st.markdown(
-            """
-### 使用说明
+def render_header(snapshot: dict[str, Any]) -> None:
+    pills = [
+        f"会话 {snapshot['current_session_title'] or '未命名'}",
+        f"会话 {snapshot['active_provider_label']}",
+        f"检索 {snapshot['actual_retrieval_mode']}",
+        f"Embedding {EMBEDDING_PROVIDER}",
+    ]
+    if snapshot["summary_present"]:
+        pills.append("Memory on")
+    if latest_metrics():
+        pills.append(f"最近 {latest_metrics().get('status', '-')}")
+    pill_html = "".join(f'<span class="status-pill">{item}</span>' for item in pills)
 
-1. 选择模型
-2. 需要时手动输入 API Key；不输入则使用 `.env`
-3. 点击“初始化 Agent”
-4. 在主界面输入问题
-
-### 当前行为
-
-- 模型负责主回答，知识库用于补充信息
-- 向量检索失败时会自动退回本地关键词检索
-- 模型连接失败时会退回知识库内容摘要
-- 涉及具体用药请以医生或药师意见为准
-"""
-        )
-
-    if st.session_state.agent is None:
-        st.info("请先在侧边栏初始化 Agent。")
-        st.markdown(
-            """
-### 欢迎使用医药智能 Agent
-
-你可以尝试这些问题：
-
-- 二甲双胍的用法
-- 二甲双胍忘记服药怎么办？
-- 二甲双胍可以长期服用吗？
-"""
-        )
-        return
-
-    st.caption(
-        f"当前会话 provider：`{st.session_state.provider}` | "
-        f"知识库检索：`{'已启用' if st.session_state.agent.retriever else '不可用'}`"
+    st.markdown(
+        f"""
+<div class="minimal-shell">
+  <div class="minimal-title">医药问答</div>
+  <p class="minimal-copy">把页面留给聊天。设置项放到左侧，状态收成轻量提示，不再占主屏。</p>
+  <div class="status-strip">{pill_html}</div>
+</div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    for msg in st.session_state.messages:
-        display_message(msg["role"], msg["content"])
 
-    prompt = st.chat_input("请输入您的问题...")
-    if not prompt:
-        return
+def render_example_prompts(enabled: bool) -> None:
+    st.markdown('<div class="section-caption">Quick Prompts</div>', unsafe_allow_html=True)
+    prompt_cols = st.columns(2, gap="small")
+    for index, prompt in enumerate(EXAMPLE_PROMPTS):
+        with prompt_cols[index % 2]:
+            if st.button(
+                prompt,
+                key=f"example_prompt_{index}",
+                use_container_width=True,
+                disabled=not enabled,
+            ):
+                st.session_state.pending_prompt = prompt
+                st.rerun()
 
+
+def display_message(role: str, content: str) -> None:
+    avatar = "🧑" if role == "user" else "💊"
+    with st.chat_message(role, avatar=avatar):
+        st.markdown(content)
+
+
+def process_prompt(prompt: str) -> None:
     display_message("user", prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    with st.spinner("思考中..."):
+    with st.spinner("检索知识与生成回答中..."):
         response = st.session_state.agent.chat(prompt)
 
     display_message("assistant", response)
     st.session_state.messages.append({"role": "assistant", "content": response})
+
+
+def render_chat_workspace(snapshot: dict[str, Any]) -> None:
+    agent_ready = st.session_state.agent is not None
+
+    if not agent_ready:
+        st.markdown(
+            """
+<div class="starter-card">
+  <strong>先初始化 Agent。</strong><br>
+  左侧选择模型、确认 API Key，然后点击“初始化”。<br>
+  初始化成功后，这里只保留聊天与示例问题。
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_example_prompts(enabled=False)
+        st.chat_input("请先初始化 Agent 后再提问。", disabled=True)
+        return
+
+    if not st.session_state.messages:
+        st.markdown(
+            f"""
+<div class="starter-card">
+  <strong>当前会话已就绪。</strong><br>
+  会话：{snapshot['current_session_title'] or '未命名'} · 模型：{snapshot['active_provider_label']} · 检索：{snapshot['actual_retrieval_mode']} · 知识文档：{snapshot['documents']}<br>
+  你可以直接输入问题，或者先点下面的示例问题。
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_example_prompts(enabled=True)
+
+    for message in st.session_state.messages:
+        display_message(message["role"], message["content"])
+
+    queued_prompt = st.session_state.pending_prompt
+    prompt = st.chat_input("输入医药问题，例如用法用量、不良反应、禁忌或特殊人群注意事项...")
+    if queued_prompt:
+        st.session_state.pending_prompt = ""
+        process_prompt(queued_prompt)
+        return
+
+    if prompt:
+        process_prompt(prompt)
+
+
+def main() -> None:
+    inject_styles()
+    init_session_state()
+
+    snapshot = get_runtime_snapshot()
+    render_sidebar(snapshot)
+    snapshot = get_runtime_snapshot()
+    render_header(snapshot)
+    render_chat_workspace(snapshot)
 
 
 if __name__ == "__main__":

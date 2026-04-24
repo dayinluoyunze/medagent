@@ -6,11 +6,13 @@ Core medical agent chat flow with persisted markdown memory.
 import json
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from openai import APIConnectionError, APITimeoutError, OpenAI
@@ -22,7 +24,9 @@ from config import (
     CHAT_METRICS_FILENAME,
     LOG_DIR,
     MEMORY_DIR,
+    MEMORY_CURRENT_SESSION_FILENAME,
     MEMORY_HISTORY_FILENAME,
+    MEMORY_SESSIONS_DIRNAME,
     MEMORY_SUMMARY_FILENAME,
     get_api_key_for_provider,
     get_provider_config,
@@ -46,9 +50,17 @@ class MedicalAgent:
         self.memory_dir = Path(MEMORY_DIR)
         self.history_file = self.memory_dir / MEMORY_HISTORY_FILENAME
         self.summary_file = self.memory_dir / MEMORY_SUMMARY_FILENAME
+        self.current_session_file = self.memory_dir / MEMORY_CURRENT_SESSION_FILENAME
+        self.sessions_dir = self.memory_dir / MEMORY_SESSIONS_DIRNAME
         self.log_dir = Path(LOG_DIR)
         self.metrics_file = self.log_dir / CHAT_METRICS_FILENAME
+        self.current_session_id = ""
+        self.current_session_title = ""
         self._load_memory()
+
+    @property
+    def _uses_openai_compatible_raw_only(self) -> bool:
+        return self.provider == "minimax"
 
     def _init_llm(self) -> ChatOpenAI:
         return ChatOpenAI(
@@ -70,9 +82,119 @@ class MedicalAgent:
         )
 
     def _load_memory(self) -> None:
+        if not APP_CONFIG["memory_enabled"]:
+            self.conversation_history = []
+            self.summary_memory = ""
+            self.current_session_id = ""
+            self.current_session_title = ""
+            return
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._load_current_session_meta()
         self.conversation_history = self._load_history_markdown()
         self.summary_memory = self._load_summary_markdown()
+        self._ensure_session_initialized()
+
+    def _session_path(self, session_id: str) -> Path:
+        return self.sessions_dir / f"{session_id}.json"
+
+    def _read_session_payload(self, session_id: str) -> Dict[str, Any]:
+        return json.loads(self._session_path(session_id).read_text(encoding="utf-8"))
+
+    def _new_session_id(self) -> str:
+        return datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+
+    def _default_session_title(self) -> str:
+        return datetime.now().strftime("会话 %m-%d %H:%M")
+
+    def _derive_session_title(self, messages: List[Dict[str, str]]) -> str:
+        for message in messages:
+            if message["role"] != "user":
+                continue
+            content = re.sub(r"\s+", " ", message["content"]).strip()
+            if not content:
+                continue
+            return content[:28] + ("..." if len(content) > 28 else "")
+        return self._default_session_title()
+
+    def _load_current_session_meta(self) -> None:
+        if not self.current_session_file.exists():
+            self.current_session_id = ""
+            self.current_session_title = ""
+            return
+
+        try:
+            payload = json.loads(self.current_session_file.read_text(encoding="utf-8"))
+        except Exception:
+            self.current_session_id = ""
+            self.current_session_title = ""
+            return
+
+        self.current_session_id = str(payload.get("session_id", "")).strip()
+        self.current_session_title = str(payload.get("title", "")).strip()
+
+    def _write_current_session_meta(self) -> None:
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": self.current_session_id,
+            "title": self.current_session_title,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.current_session_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _build_session_payload(self) -> Dict[str, Any]:
+        now = datetime.now().isoformat(timespec="seconds")
+        title = self._derive_session_title(self.conversation_history)
+        if not self.current_session_title:
+            self.current_session_title = title
+        elif self.current_session_title == self._default_session_title() and self.conversation_history:
+            self.current_session_title = title
+
+        return {
+            "session_id": self.current_session_id,
+            "title": self.current_session_title or title,
+            "provider": self.provider,
+            "updated_at": now,
+            "message_count": len(self.conversation_history),
+            "summary_memory": self.summary_memory,
+            "conversation_history": self.conversation_history,
+        }
+
+    def _write_session_snapshot(self) -> None:
+        if not APP_CONFIG["memory_enabled"] or not self.current_session_id:
+            return
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        payload = self._build_session_payload()
+        self._session_path(self.current_session_id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._write_current_session_meta()
+
+    def _ensure_session_initialized(self) -> None:
+        if self.current_session_id:
+            session_path = self._session_path(self.current_session_id)
+            if session_path.exists():
+                if not self.current_session_title:
+                    try:
+                        payload = json.loads(session_path.read_text(encoding="utf-8"))
+                        self.current_session_title = str(payload.get("title", "")).strip()
+                    except Exception:
+                        self.current_session_title = ""
+                return
+
+        if self.conversation_history or self.summary_memory:
+            self.current_session_id = self._new_session_id()
+            self.current_session_title = self._derive_session_title(self.conversation_history)
+            self._write_session_snapshot()
+            return
+
+        self.current_session_id = self._new_session_id()
+        self.current_session_title = self._default_session_title()
+        self._write_current_session_meta()
 
     def _load_history_markdown(self) -> List[Dict[str, str]]:
         if not self.history_file.exists():
@@ -103,7 +225,10 @@ class MedicalAgent:
         return content
 
     def _save_memory(self) -> None:
+        if not APP_CONFIG["memory_enabled"]:
+            return
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
         history_lines = ["# Conversation History", ""]
         for msg in self.conversation_history:
@@ -115,6 +240,7 @@ class MedicalAgent:
 
         summary_lines = ["# Summary Memory", "", self.summary_memory.strip()]
         self.summary_file.write_text("\n".join(summary_lines).strip() + "\n", encoding="utf-8")
+        self._write_session_snapshot()
 
     def _generate_summary_text(self, messages: List[Dict[str, str]]) -> str:
         transcript_lines = []
@@ -135,8 +261,7 @@ class MedicalAgent:
         )
 
         try:
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            return str(response.content).strip()
+            return self._invoke_langchain_messages([HumanMessage(content=prompt)])
         except Exception:
             bullets = []
             if self.summary_memory:
@@ -147,6 +272,8 @@ class MedicalAgent:
             return "\n".join(bullets).strip()
 
     def _maybe_rollup_memory(self) -> None:
+        if not APP_CONFIG["memory_enabled"]:
+            return
         trigger = APP_CONFIG["memory_summary_trigger_messages"]
         keep_recent = APP_CONFIG["memory_recent_messages"]
 
@@ -180,6 +307,114 @@ class MedicalAgent:
         context = "\n\n".join(doc.page_content for doc in docs)
         return context, docs
 
+    def _assess_medical_risk(self, user_input: str) -> Dict[str, Any]:
+        text = user_input.strip()
+        flags: List[str] = []
+        level = "normal"
+
+        personal_markers = ["我", "本人", "家里人", "患者", "老人", "孩子", "宝宝", "孕妇", "我爸", "我妈"]
+        urgent_markers = ["现在", "突然", "立刻", "紧急", "严重", "怎么办", "能不能马上", "要不要去医院"]
+        emergency_terms = [
+            "胸痛",
+            "呼吸困难",
+            "昏迷",
+            "抽搐",
+            "大出血",
+            "休克",
+            "严重过敏",
+            "自杀",
+            "中毒",
+            "意识不清",
+            "血氧低",
+        ]
+        diagnosis_terms = ["是不是", "确诊", "诊断", "什么病", "判断我", "能否判断", "属于什么病"]
+        medication_adjustment_terms = [
+            "停药",
+            "加量",
+            "减量",
+            "换药",
+            "联合用药",
+            "一起吃",
+            "怎么调整",
+            "处方",
+            "剂量怎么改",
+        ]
+        special_population_terms = ["孕妇", "备孕", "哺乳", "儿童", "小孩", "老人", "肝肾功能不全"]
+
+        has_personal_context = any(token in text for token in personal_markers)
+        has_urgent_context = any(token in text for token in urgent_markers)
+
+        if any(token in text for token in special_population_terms):
+            flags.append("special_population")
+
+        if any(token in text for token in emergency_terms) and (has_personal_context or has_urgent_context):
+            level = "emergency"
+            flags.append("emergency")
+        elif any(token in text for token in diagnosis_terms) and has_personal_context:
+            level = "diagnosis"
+            flags.append("diagnosis")
+        elif any(token in text for token in medication_adjustment_terms) and has_personal_context:
+            level = "personalized_medication"
+            flags.append("personalized_medication")
+
+        return {"level": level, "flags": flags}
+
+    def _build_emergency_response(self) -> str:
+        return (
+            "这类情况存在潜在紧急风险，我不能替代医生做远程诊断或处置。\n\n"
+            "建议你立即联系急救或尽快前往线下医疗机构；如果出现胸痛加重、呼吸困难、意识改变、抽搐、"
+            "大出血或严重过敏等情况，请优先拨打急救电话或直接就医。\n\n"
+            "如果你愿意，我可以继续帮你整理就医前需要准备的信息，例如当前症状、已用药物、既往病史和过敏史。"
+        )
+
+    def _build_guardrail_prompts(self, risk_assessment: Dict[str, Any]) -> List[str]:
+        level = risk_assessment["level"]
+        prompts: List[str] = []
+        if level == "diagnosis":
+            prompts.append(
+                "用户正在请求个体化诊断判断。你可以提供一般性医学信息和就医建议，"
+                "但不要给出确诊结论，也不要假装完成诊断。"
+            )
+        elif level == "personalized_medication":
+            prompts.append(
+                "用户正在请求个体化用药调整。你可以解释一般原则、风险点和应咨询的专业角色，"
+                "但不要直接给出针对个人的处方调整方案。"
+            )
+
+        if "special_population" in risk_assessment["flags"]:
+            prompts.append(
+                "该问题涉及特殊人群用药，请在回答中明确提示更高风险和线下专业咨询建议。"
+            )
+        return prompts
+
+    def _append_risk_notice(self, answer: str, risk_assessment: Dict[str, Any]) -> str:
+        level = risk_assessment["level"]
+        if level == "diagnosis":
+            return (
+                f"{answer.strip()}\n\n"
+                "安全提示：以上仅为一般信息，不能替代线下诊断；如果你在描述的是本人或家属的实际症状，"
+                "建议尽快由医生结合病史、查体和检查结果判断。"
+            )
+        if level == "personalized_medication":
+            return (
+                f"{answer.strip()}\n\n"
+                "安全提示：涉及个人停药、加量、减量或换药时，不能仅凭线上信息决定，"
+                "请结合原始处方、肝肾功能、合并用药和既往病史咨询医生或药师。"
+            )
+        return answer
+
+    def _sanitize_for_logging(self, text: str) -> str:
+        if not APP_CONFIG["log_redact_questions"]:
+            return text[: APP_CONFIG["log_question_max_chars"]]
+
+        sanitized = text
+        sanitized = re.sub(r"[\w.\-]+@[\w.\-]+\.\w+", "[EMAIL]", sanitized)
+        sanitized = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d)", "[PHONE]", sanitized)
+        sanitized = re.sub(r"(?<!\d)\d{17}[\dXx](?!\d)", "[ID]", sanitized)
+        sanitized = re.sub(r"\b\d{1,3}\s*岁\b", "[AGE]", sanitized)
+        sanitized = re.sub(r"(?<!\d)\d{6,}(?!\d)", "[NUMBER]", sanitized)
+        return sanitized[: APP_CONFIG["log_question_max_chars"]]
+
     def _format_source_label(self, doc: Document) -> str:
         source = str(doc.metadata.get("source", "")).strip()
         source_file = str(doc.metadata.get("source_file", "")).strip()
@@ -205,12 +440,105 @@ class MedicalAgent:
             if label in seen:
                 continue
             seen.add(label)
-            source_lines.append(f"- {label}")
+            excerpt = str(doc.metadata.get("excerpt", "")).strip()
+            line = f"- {label}"
+            if excerpt:
+                line += f" | 片段：{excerpt}"
+            source_lines.append(line)
 
         if not source_lines:
             return answer
 
         return f"{str(answer).strip()}\n\n参考来源：\n" + "\n".join(source_lines)
+
+    def _base_system_prompt(self) -> str:
+        if self.provider == "minimax":
+            return (
+                "你是专业医药知识助手。\n"
+                "回答要求：\n"
+                "1. 只提供一般性医药信息，不做诊断，不给个体化处方调整。\n"
+                "2. 如果提供了知识库补充，优先参考，并在回答中明确写出“根据知识库补充”。\n"
+                "3. 先给核心结论，再补充注意事项或就医建议。\n"
+                "4. 涉及特殊人群、禁忌、不良反应或漏服处理时，回答要谨慎。\n"
+                "5. 使用清晰、自然、专业的中文，避免空话和重复。"
+            )
+        return APP_CONFIG["system_prompt"].strip()
+
+    def _build_system_prompt_text(
+        self,
+        retrieved_context: str = "",
+        extra_system_prompts: List[str] | None = None,
+    ) -> str:
+        sections = [self._base_system_prompt()]
+
+        for prompt in extra_system_prompts or []:
+            if prompt and prompt.strip():
+                sections.append(prompt.strip())
+
+        if self.summary_memory.strip():
+            sections.append(
+                "以下是本次会话的长期记忆摘要，请作为上下文参考：\n\n"
+                f"{self.summary_memory.strip()}"
+            )
+
+        if retrieved_context:
+            sections.append(
+                "以下是与用户问题相关的知识库补充内容。"
+                "你应先直接回答用户问题，再吸收这些信息进行补充。"
+                "如果使用了这些内容，请在回答中明确写出“根据知识库补充”。"
+                "回答时不要过度简写，尽量给出完整且有条理的说明。\n\n"
+                f"知识库补充内容：\n{retrieved_context}"
+            )
+
+        return "\n\n".join(sections).strip()
+
+    def _langchain_messages_to_openai(
+        self,
+        messages: List[BaseMessage],
+    ) -> List[Dict[str, str]]:
+        converted: List[Dict[str, str]] = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                role = "system"
+            elif isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            else:
+                role = "user"
+            converted.append({"role": role, "content": str(msg.content)})
+        return converted
+
+    def _build_completion_kwargs(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "model": self.provider_config["model"],
+            "messages": messages,
+            "temperature": APP_CONFIG["temperature"],
+        }
+        if self.provider == "minimax":
+            kwargs["max_completion_tokens"] = min(APP_CONFIG["max_tokens"], 1024)
+        else:
+            kwargs["max_tokens"] = APP_CONFIG["max_tokens"]
+        return kwargs
+
+    def _invoke_openai_compatible_messages(self, messages: List[Dict[str, str]]) -> str:
+        response = self.raw_client.chat.completions.create(
+            **self._build_completion_kwargs(messages)
+        )
+        choice = response.choices[0] if response.choices else None
+        content = choice.message.content if choice and choice.message else None
+        if not content:
+            raise RuntimeError("模型返回了空内容。")
+        return str(content).strip()
+
+    def _invoke_langchain_messages(self, messages: List[BaseMessage]) -> str:
+        if self._uses_openai_compatible_raw_only:
+            return self._invoke_openai_compatible_messages(
+                self._langchain_messages_to_openai(messages)
+            )
+
+        response = self.llm.invoke(messages)
+        return str(response.content).strip()
 
     def _log_chat_event(
         self,
@@ -222,13 +550,15 @@ class MedicalAgent:
         status: str,
         fallback_used: bool,
         error_type: str = "",
+        risk_level: str = "normal",
+        risk_flags: List[str] | None = None,
     ) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "provider": self.provider,
             "embedding_provider": EMBEDDING_PROVIDER,
-            "question": user_input,
+            "question_redacted": self._sanitize_for_logging(user_input),
             "answer_length": len(str(answer)),
             "retrieved_doc_count": len(docs),
             "source_labels": [self._format_source_label(doc) for doc in docs],
@@ -236,39 +566,33 @@ class MedicalAgent:
             "fallback_used": fallback_used,
             "status": status,
             "error_type": error_type,
+            "risk_level": risk_level,
+            "risk_flags": risk_flags or [],
             "duration_ms": round(duration_ms, 2),
         }
         with self.metrics_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def _build_prompt(self, user_input: str, retrieved_context: str = "") -> List[Any]:
-        messages: List[Any] = [SystemMessage(content=APP_CONFIG["system_prompt"])]
-
-        if self.summary_memory:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "以下是本次会话的长期记忆摘要，请作为上下文参考：\n\n"
-                        f"{self.summary_memory}"
-                    )
+    def _build_prompt(
+        self,
+        user_input: str,
+        retrieved_context: str = "",
+        extra_system_prompts: List[str] | None = None,
+    ) -> List[Any]:
+        messages: List[Any] = [
+            SystemMessage(
+                content=self._build_system_prompt_text(
+                    retrieved_context,
+                    extra_system_prompts,
                 )
             )
+        ]
 
         for msg in self.conversation_history[-APP_CONFIG["max_history"] :]:
             if msg["role"] == "user":
                 messages.append(HumanMessage(content=msg["content"]))
             else:
                 messages.append(AIMessage(content=msg["content"]))
-
-        if retrieved_context:
-            context_prompt = (
-                "以下是与用户问题相关的知识库补充内容。"
-                "你应先直接回答用户问题，再吸收这些信息进行补充。"
-                "如果使用了这些内容，请在回答中明确写出“根据知识库补充”。"
-                "回答时不要过度简写，尽量给出完整且有条理的说明。\n\n"
-                f"知识库补充内容：\n{retrieved_context}"
-            )
-            messages.append(SystemMessage(content=context_prompt))
 
         messages.append(HumanMessage(content=user_input))
         return messages
@@ -277,19 +601,17 @@ class MedicalAgent:
         self,
         user_input: str,
         retrieved_context: str = "",
+        extra_system_prompts: List[str] | None = None,
     ) -> List[Dict[str, str]]:
-        messages = [{"role": "system", "content": APP_CONFIG["system_prompt"]}]
-
-        if self.summary_memory:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "以下是本次会话的长期记忆摘要，请作为上下文参考：\n\n"
-                        f"{self.summary_memory}"
-                    ),
-                }
-            )
+        messages: List[Dict[str, str]] = [
+            {
+                "role": "system",
+                "content": self._build_system_prompt_text(
+                    retrieved_context,
+                    extra_system_prompts,
+                ),
+            }
+        ]
 
         for msg in self.conversation_history[-APP_CONFIG["max_history"] :]:
             messages.append(
@@ -299,35 +621,18 @@ class MedicalAgent:
                 }
             )
 
-        if retrieved_context:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "以下是与用户问题相关的知识库补充内容。"
-                        "你应先直接回答用户问题，再吸收这些信息进行补充。"
-                        "如果使用了这些内容，请在回答中明确写出“根据知识库补充”。"
-                        "回答时不要过度简写，尽量给出完整且有条理的说明。\n\n"
-                        f"知识库补充内容：\n{retrieved_context}"
-                    ),
-                }
-            )
-
         messages.append({"role": "user", "content": user_input})
         return messages
 
-    def _invoke_with_raw_client(self, user_input: str, retrieved_context: str = "") -> str:
-        response = self.raw_client.chat.completions.create(
-            model=self.provider_config["model"],
-            messages=self._to_openai_messages(user_input, retrieved_context),
-            temperature=APP_CONFIG["temperature"],
-            max_tokens=APP_CONFIG["max_tokens"],
+    def _invoke_with_raw_client(
+        self,
+        user_input: str,
+        retrieved_context: str = "",
+        extra_system_prompts: List[str] | None = None,
+    ) -> str:
+        return self._invoke_openai_compatible_messages(
+            self._to_openai_messages(user_input, retrieved_context, extra_system_prompts)
         )
-        choice = response.choices[0] if response.choices else None
-        content = choice.message.content if choice and choice.message else None
-        if not content:
-            raise RuntimeError("模型返回了空内容。")
-        return str(content).strip()
 
     def _record_turn(self, user_input: str, answer: str) -> None:
         self.conversation_history.append({"role": "user", "content": user_input})
@@ -355,11 +660,31 @@ class MedicalAgent:
 
     def chat(self, user_input: str) -> str:
         started_at = time.perf_counter()
+        risk_assessment = self._assess_medical_risk(user_input)
+        if risk_assessment["level"] == "emergency":
+            answer = self._build_emergency_response()
+            self._log_chat_event(
+                user_input=user_input,
+                answer=answer,
+                docs=[],
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                status="guardrail_block",
+                fallback_used=False,
+                error_type="emergency_risk",
+                risk_level=risk_assessment["level"],
+                risk_flags=risk_assessment["flags"],
+            )
+            return answer
+
+        extra_system_prompts = self._build_guardrail_prompts(risk_assessment)
         retrieved_context, docs = self._retrieve_context(user_input)
         try:
-            messages = self._build_prompt(user_input, retrieved_context)
-            response = self.llm.invoke(messages)
-            answer = self._append_sources(str(response.content).strip(), docs)
+            messages = self._build_prompt(user_input, retrieved_context, extra_system_prompts)
+            answer = self._append_risk_notice(
+                self._invoke_langchain_messages(messages),
+                risk_assessment,
+            )
+            answer = self._append_sources(answer, docs)
             self._record_turn(user_input, answer)
             self._log_chat_event(
                 user_input=user_input,
@@ -368,10 +693,13 @@ class MedicalAgent:
                 duration_ms=(time.perf_counter() - started_at) * 1000,
                 status="success",
                 fallback_used=False,
+                risk_level=risk_assessment["level"],
+                risk_flags=risk_assessment["flags"],
             )
             return answer
         except (APIConnectionError, APITimeoutError):
             answer = self._build_local_fallback_answer(user_input, docs)
+            answer = self._append_risk_notice(answer, risk_assessment)
             self._record_turn(user_input, answer)
             self._log_chat_event(
                 user_input=user_input,
@@ -381,12 +709,19 @@ class MedicalAgent:
                 status="fallback",
                 fallback_used=True,
                 error_type="api_connection_or_timeout",
+                risk_level=risk_assessment["level"],
+                risk_flags=risk_assessment["flags"],
             )
             return answer
         except Exception as primary_exc:
             try:
-                raw_answer = self._invoke_with_raw_client(user_input, retrieved_context)
-                answer = self._append_sources(raw_answer, docs)
+                raw_answer = self._invoke_with_raw_client(
+                    user_input,
+                    retrieved_context,
+                    extra_system_prompts,
+                )
+                answer = self._append_risk_notice(raw_answer, risk_assessment)
+                answer = self._append_sources(answer, docs)
                 self._record_turn(user_input, answer)
                 self._log_chat_event(
                     user_input=user_input,
@@ -396,10 +731,31 @@ class MedicalAgent:
                     status="success_after_retry",
                     fallback_used=False,
                     error_type=type(primary_exc).__name__,
+                    risk_level=risk_assessment["level"],
+                    risk_flags=risk_assessment["flags"],
                 )
                 return answer
+            except Exception as exc:
+                if self._uses_openai_compatible_raw_only:
+                    answer = self._build_local_fallback_answer(user_input, docs)
+                    answer = self._append_risk_notice(answer, risk_assessment)
+                    self._record_turn(user_input, answer)
+                    self._log_chat_event(
+                        user_input=user_input,
+                        answer=answer,
+                        docs=docs,
+                        duration_ms=(time.perf_counter() - started_at) * 1000,
+                        status="fallback",
+                        fallback_used=True,
+                        error_type=type(exc).__name__,
+                        risk_level=risk_assessment["level"],
+                        risk_flags=risk_assessment["flags"],
+                    )
+                    return answer
+                raise
             except (APIConnectionError, APITimeoutError):
                 answer = self._build_local_fallback_answer(user_input, docs)
+                answer = self._append_risk_notice(answer, risk_assessment)
                 self._record_turn(user_input, answer)
                 self._log_chat_event(
                     user_input=user_input,
@@ -409,6 +765,8 @@ class MedicalAgent:
                     status="fallback",
                     fallback_used=True,
                     error_type="api_connection_or_timeout",
+                    risk_level=risk_assessment["level"],
+                    risk_flags=risk_assessment["flags"],
                 )
                 return answer
             except Exception as exc:
@@ -421,6 +779,8 @@ class MedicalAgent:
                     status="error",
                     fallback_used=False,
                     error_type=type(exc).__name__,
+                    risk_level=risk_assessment["level"],
+                    risk_flags=risk_assessment["flags"],
                 )
                 return answer
 
@@ -430,9 +790,99 @@ class MedicalAgent:
         for path in (self.history_file, self.summary_file):
             if path.exists():
                 path.unlink()
+        self.current_session_id = self._new_session_id()
+        self.current_session_title = self._default_session_title()
+        if APP_CONFIG["memory_enabled"]:
+            self._write_current_session_meta()
 
     def get_history(self) -> List[Dict[str, str]]:
         return self.conversation_history
+
+    def get_session_meta(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.current_session_id,
+            "title": self.current_session_title or self._default_session_title(),
+            "provider": self.provider,
+            "message_count": len(self.conversation_history),
+            "summary_present": bool(self.summary_memory.strip()),
+        }
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        if not APP_CONFIG["memory_enabled"]:
+            return []
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+        sessions: List[Dict[str, Any]] = []
+        for path in sorted(self.sessions_dir.glob("*.json"), reverse=True):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            sessions.append(
+                {
+                    "session_id": str(payload.get("session_id", path.stem)),
+                    "title": str(payload.get("title", path.stem)),
+                    "updated_at": str(payload.get("updated_at", "")),
+                    "message_count": int(payload.get("message_count", 0)),
+                    "provider": str(payload.get("provider", self.provider)),
+                }
+            )
+
+        sessions.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+        return sessions
+
+    def load_session(self, session_id: str) -> None:
+        payload = self._read_session_payload(session_id)
+        self.current_session_id = str(payload.get("session_id", session_id))
+        self.current_session_title = str(payload.get("title", "")).strip() or self._default_session_title()
+        self.conversation_history = [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in payload.get("conversation_history", [])
+            if isinstance(item, dict) and "role" in item and "content" in item
+        ]
+        self.summary_memory = str(payload.get("summary_memory", "")).strip()
+        self._save_memory()
+
+    def start_new_session(self) -> None:
+        if APP_CONFIG["memory_enabled"] and self.conversation_history:
+            self._write_session_snapshot()
+        self.clear_history()
+
+    def rename_session(self, session_id: str, title: str) -> None:
+        normalized_title = re.sub(r"\s+", " ", title).strip()
+        if not normalized_title:
+            raise ValueError("会话标题不能为空。")
+
+        if session_id == self.current_session_id:
+            self.current_session_title = normalized_title
+            self._save_memory()
+            return
+
+        payload = self._read_session_payload(session_id)
+        payload["title"] = normalized_title
+        payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._session_path(session_id).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def delete_session(self, session_id: str) -> None:
+        session_path = self._session_path(session_id)
+        if session_path.exists():
+            session_path.unlink()
+
+        if session_id != self.current_session_id:
+            return
+
+        self.conversation_history = []
+        self.summary_memory = ""
+        for path in (self.history_file, self.summary_file):
+            if path.exists():
+                path.unlink()
+        self.current_session_id = self._new_session_id()
+        self.current_session_title = self._default_session_title()
+        if APP_CONFIG["memory_enabled"]:
+            self._write_current_session_meta()
 
 
 def create_agent(provider: str = DEFAULT_PROVIDER, api_key: str = "") -> MedicalAgent:

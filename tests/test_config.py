@@ -15,6 +15,11 @@ class ConfigTests(unittest.TestCase):
         config = get_provider_config("modelscope", for_embedding=True)
         self.assertEqual(config["model"], "Qwen/Qwen3-Embedding-8B")
 
+    def test_get_embedding_config_supports_none_provider(self) -> None:
+        config = get_provider_config("none", for_embedding=True)
+        self.assertEqual(config["model"], "")
+        self.assertEqual(config["api_key_env"], "")
+
     def test_get_api_key_for_provider_reads_from_environment(self) -> None:
         with patch.dict(os.environ, {"MODELSCOPE_API_KEY": "test-key"}, clear=False):
             api_key = get_api_key_for_provider("modelscope")
