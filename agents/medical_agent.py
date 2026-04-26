@@ -23,11 +23,13 @@ from config import (
     EMBEDDING_PROVIDER,
     CHAT_METRICS_FILENAME,
     LOG_DIR,
+    MEDICAL_KNOWLEDGE_DIR,
     MEMORY_DIR,
     MEMORY_CURRENT_SESSION_FILENAME,
     MEMORY_HISTORY_FILENAME,
     MEMORY_SESSIONS_DIRNAME,
     MEMORY_SUMMARY_FILENAME,
+    PERSONAL_KNOWLEDGE_DIR,
     get_api_key_for_provider,
     get_provider_config,
 )
@@ -45,6 +47,12 @@ class MedicalAgent:
         self.raw_client = self._init_raw_client()
         self.retriever = None
         self.retriever_error = ""
+        self.medical_retriever = None
+        self.personal_retriever = None
+        self.medical_retriever_error = ""
+        self.personal_retriever_error = ""
+        self.medical_knowledge_enabled = APP_CONFIG["medical_knowledge_enabled"]
+        self.personal_knowledge_enabled = APP_CONFIG["personal_knowledge_enabled"]
         self.conversation_history: List[Dict[str, str]] = []
         self.summary_memory = ""
         self.memory_dir = Path(MEMORY_DIR)
@@ -289,23 +297,58 @@ class MedicalAgent:
 
     def init_retriever(self) -> None:
         embedding_api_key = self.api_key if self.provider == EMBEDDING_PROVIDER else ""
-        retriever = create_retriever(
+        self.medical_retriever = create_retriever(
             embedding_provider=EMBEDDING_PROVIDER,
             embedding_api_key=embedding_api_key,
+            knowledge_dir=MEDICAL_KNOWLEDGE_DIR,
+            knowledge_base="medical",
+            index_namespace="medical",
         )
-        self.retriever = retriever
-        self.retriever_error = retriever.init_error
+        self.personal_retriever = create_retriever(
+            embedding_provider=EMBEDDING_PROVIDER,
+            embedding_api_key=embedding_api_key,
+            knowledge_dir=PERSONAL_KNOWLEDGE_DIR,
+            knowledge_base="personal",
+            index_namespace="personal",
+        )
+        self.retriever = self.medical_retriever
+        self.medical_retriever_error = self.medical_retriever.init_error
+        self.personal_retriever_error = self.personal_retriever.init_error
+        self.retriever_error = self._active_retriever_error()
+
+    def set_knowledge_enabled(self, medical_enabled: bool, personal_enabled: bool) -> None:
+        self.medical_knowledge_enabled = bool(medical_enabled)
+        self.personal_knowledge_enabled = bool(personal_enabled)
+        self.retriever_error = self._active_retriever_error()
+
+    def _active_retriever_error(self) -> str:
+        errors = []
+        if self.medical_knowledge_enabled and self.medical_retriever_error:
+            errors.append(f"医疗知识库：{self.medical_retriever_error}")
+        if self.personal_knowledge_enabled and self.personal_retriever_error:
+            errors.append(f"个人信息库：{self.personal_retriever_error}")
+        return "；".join(errors)
 
     def _retrieve_context(self, user_input: str, k: int = 4) -> tuple[str, List[Document]]:
-        if not self.retriever:
-            return "", []
+        sections: List[str] = []
+        all_docs: List[Document] = []
+        stores = [
+            ("医疗知识库", self.medical_retriever, self.medical_knowledge_enabled),
+            ("个人信息库", self.personal_retriever, self.personal_knowledge_enabled),
+        ]
 
-        docs = self.retriever.similarity_search(user_input, k=k)
-        if not docs:
-            return "", []
+        for label, retriever, enabled in stores:
+            if not enabled or not retriever:
+                continue
+            docs = retriever.similarity_search(user_input, k=k)
+            if not docs:
+                continue
+            sections.append(
+                f"【{label}】\n" + "\n\n".join(doc.page_content for doc in docs)
+            )
+            all_docs.extend(docs)
 
-        context = "\n\n".join(doc.page_content for doc in docs)
-        return context, docs
+        return "\n\n".join(sections), all_docs
 
     def _assess_medical_risk(self, user_input: str) -> Dict[str, Any]:
         text = user_input.strip()
@@ -418,16 +461,18 @@ class MedicalAgent:
     def _format_source_label(self, doc: Document) -> str:
         source = str(doc.metadata.get("source", "")).strip()
         source_file = str(doc.metadata.get("source_file", "")).strip()
+        knowledge_base = str(doc.metadata.get("knowledge_base", "")).strip()
+        prefix = "个人信息库/" if knowledge_base == "personal" else ""
 
         if source.startswith(("http://", "https://")):
             if source_file:
-                return f"{source} (from {Path(source_file).name})"
-            return source
+                return f"{prefix}{source} (from {Path(source_file).name})"
+            return f"{prefix}{source}"
 
         if source:
-            return Path(source).name
+            return f"{prefix}{Path(source).name}"
 
-        return "unknown source"
+        return f"{prefix}unknown source"
 
     def _append_sources(self, answer: str, docs: List[Document]) -> str:
         if not docs:
@@ -562,6 +607,15 @@ class MedicalAgent:
             "answer_length": len(str(answer)),
             "retrieved_doc_count": len(docs),
             "source_labels": [self._format_source_label(doc) for doc in docs],
+            "knowledge_bases_hit": sorted(
+                {
+                    str(doc.metadata.get("knowledge_base", "medical"))
+                    for doc in docs
+                    if doc.metadata.get("knowledge_base", "medical")
+                }
+            ),
+            "medical_knowledge_enabled": getattr(self, "medical_knowledge_enabled", True),
+            "personal_knowledge_enabled": getattr(self, "personal_knowledge_enabled", False),
             "knowledge_hit": bool(docs),
             "fallback_used": fallback_used,
             "status": status,
@@ -641,12 +695,6 @@ class MedicalAgent:
         self._save_memory()
 
     def _build_local_fallback_answer(self, user_input: str, docs: List[Document]) -> str:
-        if not self.retriever:
-            return (
-                "抱歉，当前模型服务不可用，且本地知识库也未准备好，"
-                "暂时无法回答这个问题。"
-            )
-
         if not docs:
             return "抱歉，当前模型服务不可用，且本地知识库中没有找到明确相关内容。"
 

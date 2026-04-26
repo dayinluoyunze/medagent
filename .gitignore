@@ -32,6 +32,7 @@ pytest-cache-files-*/
 
 # User-uploaded knowledge from the web UI
 knowledge/uploads/
+personal_knowledge/
 
 # Local memory and generated conversation data
 memory/conversation_history.md

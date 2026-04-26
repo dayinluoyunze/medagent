@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest
+        run: python -m pytest
 
       - name: Run retrieval evaluation
         run: python eval/run_eval.py --min-retrieval-hit-rate 0.6 --min-keyword-coverage-rate 0.4

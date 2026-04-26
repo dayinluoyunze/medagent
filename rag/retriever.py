@@ -60,19 +60,44 @@ class KnowledgeRetriever:
         self,
         embedding_provider: str | None = None,
         embedding_api_key: str = "",
+        knowledge_dir: str | Path = KNOWLEDGE_DIR,
+        knowledge_base: str = "medical",
+        index_namespace: str | None = None,
     ):
         self.embedding_provider = embedding_provider or EMBEDDING_PROVIDER
         self.embedding_api_key = (
             embedding_api_key
             or get_api_key_for_provider(self.embedding_provider, for_embedding=True)
         )
+        self.knowledge_dir = Path(knowledge_dir)
+        self.knowledge_base = knowledge_base
+        self.index_namespace = index_namespace or self._safe_index_namespace(
+            str(self.knowledge_dir)
+        )
         self.vectorstore = None
         self.documents: List[Document] = []
         self.chunks: List[Document] = []
         self.init_error = ""
-        self.index_dir = os.path.join(VECTORSTORE_DIR, self.embedding_provider)
+        self.index_dir = os.path.join(
+            VECTORSTORE_DIR,
+            self.embedding_provider,
+            self.index_namespace,
+        )
         self.manifest_path = os.path.join(self.index_dir, VECTORSTORE_MANIFEST)
         self._init_vectorstore()
+
+    def _safe_index_namespace(self, value: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
+        return normalized or "knowledge"
+
+    def _metadata_with_knowledge_base(self, metadata: dict) -> dict:
+        enriched = dict(metadata)
+        enriched.setdefault("knowledge_base", getattr(self, "knowledge_base", "medical"))
+        enriched.setdefault(
+            "knowledge_dir",
+            str(getattr(self, "knowledge_dir", Path(KNOWLEDGE_DIR))),
+        )
+        return enriched
 
     def _allow_remote_url(self, url: str) -> bool:
         if not APP_CONFIG["allow_remote_knowledge_fetch"]:
@@ -96,7 +121,7 @@ class KnowledgeRetriever:
         )
 
     def _knowledge_files(self) -> List[Path]:
-        root = Path(KNOWLEDGE_DIR)
+        root = Path(getattr(self, "knowledge_dir", KNOWLEDGE_DIR))
         if not root.exists():
             return []
 
@@ -110,7 +135,9 @@ class KnowledgeRetriever:
     def _make_document(self, content: str, filepath: Path, file_type: str) -> Document:
         return Document(
             page_content=content,
-            metadata={"source": str(filepath), "file_type": file_type},
+            metadata=self._metadata_with_knowledge_base(
+                {"source": str(filepath), "file_type": file_type}
+            ),
         )
 
     def _split_frontmatter(self, content: str) -> tuple[dict, str]:
@@ -135,7 +162,9 @@ class KnowledgeRetriever:
     def _load_text_file(self, filepath: Path) -> List[Document]:
         content = filepath.read_text(encoding="utf-8", errors="ignore")
         frontmatter, body = self._split_frontmatter(content)
-        metadata = {"source": str(filepath), "file_type": filepath.suffix.lower()}
+        metadata = self._metadata_with_knowledge_base(
+            {"source": str(filepath), "file_type": filepath.suffix.lower()}
+        )
 
         source_url = str(frontmatter.get("medagent_source_url", "")).strip()
         if source_url.startswith(("http://", "https://")):
@@ -277,12 +306,14 @@ class KnowledgeRetriever:
                 documents.append(
                     Document(
                         page_content=text,
-                        metadata={
-                            "source": url,
-                            "source_file": str(filepath),
-                            "file_type": filepath.suffix.lower(),
-                            "host": hostname,
-                        },
+                        metadata=self._metadata_with_knowledge_base(
+                            {
+                                "source": url,
+                                "source_file": str(filepath),
+                                "file_type": filepath.suffix.lower(),
+                                "host": hostname,
+                            }
+                        ),
                     )
                 )
             except Exception as exc:
@@ -326,8 +357,13 @@ class KnowledgeRetriever:
 
     def _hash_files(self, files: Iterable[Path]) -> str:
         digest = hashlib.sha256()
+        root = Path(getattr(self, "knowledge_dir", KNOWLEDGE_DIR))
         for filepath in files:
-            digest.update(str(filepath.relative_to(Path(KNOWLEDGE_DIR))).encode("utf-8"))
+            try:
+                relative_path = filepath.relative_to(root)
+            except ValueError:
+                relative_path = filepath
+            digest.update(str(relative_path).encode("utf-8"))
             digest.update(filepath.read_bytes())
         return digest.hexdigest()
 
@@ -338,6 +374,9 @@ class KnowledgeRetriever:
             "embedding_model": get_provider_config(
                 self.embedding_provider, for_embedding=True
             )["model"],
+            "knowledge_base": self.knowledge_base,
+            "knowledge_dir": str(self.knowledge_dir),
+            "index_namespace": self.index_namespace,
             "retrieval_mode": APP_CONFIG["retrieval_mode"],
             "allow_remote_knowledge_fetch": APP_CONFIG["allow_remote_knowledge_fetch"],
             "remote_knowledge_allowlist": APP_CONFIG["remote_knowledge_allowlist"],
@@ -347,7 +386,7 @@ class KnowledgeRetriever:
             "ocr_max_pages": APP_CONFIG["ocr_max_pages"],
             "knowledge_signature": self._hash_files(files),
             "file_count": len(files),
-            "loader_version": 6,
+            "loader_version": 7,
         }
 
     def _read_manifest(self) -> dict | None:
@@ -611,8 +650,14 @@ class KnowledgeRetriever:
 def create_retriever(
     embedding_provider: str | None = None,
     embedding_api_key: str = "",
+    knowledge_dir: str | Path = KNOWLEDGE_DIR,
+    knowledge_base: str = "medical",
+    index_namespace: str | None = None,
 ) -> KnowledgeRetriever:
     return KnowledgeRetriever(
         embedding_provider=embedding_provider,
         embedding_api_key=embedding_api_key,
+        knowledge_dir=knowledge_dir,
+        knowledge_base=knowledge_base,
+        index_namespace=index_namespace,
     )

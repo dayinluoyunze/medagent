@@ -112,6 +112,7 @@ medagent/
 │  ├─ sample.docx
 │  ├─ sample.url
 │  └─ sample.urls
+├─ personal_knowledge/      # 本地个人资料库，默认不提交到 Git
 └─ memory/
    ├─ conversation_history.md
    └─ conversation_summary.md
@@ -138,6 +139,8 @@ LLM_PROVIDER=modelscope
 EMBEDDING_PROVIDER=modelscope
 MODELSCOPE_API_KEY=your-modelscope-key
 ALLOW_URL_KNOWLEDGE_INGESTION=true
+MEDICAL_KNOWLEDGE_ENABLED=true
+PERSONAL_KNOWLEDGE_ENABLED=false
 ```
 
 如果你目前只有 MiniMax API，推荐这样配：
@@ -186,10 +189,12 @@ streamlit run app.py
 1. 在侧边栏选择模型 Provider
 2. 输入对应 API Key，或从 `.env` 自动读取
 3. 点击“初始化 Agent”
-4. 如需补充知识库，在侧边栏打开“添加资料”，上传文件、粘贴文本或输入 URL 后点击“保存并刷新知识库”
-5. 在主界面输入医药相关问题
+4. 按需打开“启用医疗知识库”和“启用个人信息库”开关；关闭的知识库不会进入模型上下文
+5. 如需补充知识库，在侧边栏“知识库”中选择保存目标，上传文件、粘贴文本或输入 URL 后点击“保存并刷新知识库”
+6. 在主界面输入医药相关问题
 
-网页添加的资料会保存到 `knowledge/uploads/`，该目录默认不提交到 Git。
+医疗资料默认读取 `knowledge/`，网页添加的医疗资料会保存到 `knowledge/uploads/`。
+个人资料默认读取 `personal_knowledge/`，该目录默认不提交到 Git，且个人信息库默认关闭。
 URL 导入会拒绝本机、内网和非 `http(s)` 地址；如需限制可导入域名，可配置 `REMOTE_KNOWLEDGE_ALLOWLIST`。
 OCR 依赖本机 Tesseract 程序；如果 Windows 没有安装，可先安装 Tesseract，并在 `.env` 中配置 `TESSERACT_CMD`。
 侧边栏“查看当前状态”会显示 OCR 是否可用；侧边栏“知识库”可以预览资料、删除网页添加资料并手动重建索引。
@@ -233,7 +238,7 @@ python eval/run_answer_eval.py --provider minimax --api-key your-minimax-key
 项目当前提供基础单元测试，可直接执行：
 
 ```bash
-pytest
+python -m pytest
 ```
 
 覆盖范围包括：
@@ -241,6 +246,7 @@ pytest
 - provider 配置读取
 - markdown memory 持久化
 - 来源拼接
+- 医疗知识库和个人信息库独立开关
 - 检索回退逻辑
 - 知识库上传、预览和删除
 - OCR 状态检测与降级
@@ -255,6 +261,9 @@ pytest
 - `embedding_provider`
 - `question_redacted`
 - `knowledge_hit`
+- `knowledge_bases_hit`
+- `medical_knowledge_enabled`
+- `personal_knowledge_enabled`
 - `retrieved_doc_count`
 - `source_labels`
 - `fallback_used`

@@ -66,6 +66,53 @@ class MedicalAgentTests(unittest.TestCase):
         self.assertIn("知识片段", answer)
         self.assertIn("- drugs.md", answer)
 
+    def test_retrieve_context_respects_independent_knowledge_switches(self) -> None:
+        class FakeRetriever:
+            def __init__(self, docs: list[Document]):
+                self.docs = docs
+                self.calls = 0
+
+            def similarity_search(self, query: str, k: int = 4) -> list[Document]:
+                self.calls += 1
+                return self.docs
+
+        agent = MedicalAgent.__new__(MedicalAgent)
+        medical = FakeRetriever(
+            [Document(page_content="医疗知识片段", metadata={"knowledge_base": "medical"})]
+        )
+        personal = FakeRetriever(
+            [Document(page_content="个人信息片段", metadata={"knowledge_base": "personal"})]
+        )
+        agent.medical_retriever = medical
+        agent.personal_retriever = personal
+        agent.medical_knowledge_enabled = True
+        agent.personal_knowledge_enabled = False
+
+        context, docs = agent._retrieve_context("问题")
+
+        self.assertIn("【医疗知识库】", context)
+        self.assertIn("医疗知识片段", context)
+        self.assertNotIn("个人信息片段", context)
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(medical.calls, 1)
+        self.assertEqual(personal.calls, 0)
+
+        agent.personal_knowledge_enabled = True
+        context, docs = agent._retrieve_context("问题")
+
+        self.assertIn("【个人信息库】", context)
+        self.assertIn("个人信息片段", context)
+        self.assertEqual(len(docs), 2)
+
+    def test_personal_source_label_is_explicitly_prefixed(self) -> None:
+        agent = MedicalAgent.__new__(MedicalAgent)
+        doc = Document(
+            page_content="个人信息",
+            metadata={"source": "personal_knowledge/uploads/profile.md", "knowledge_base": "personal"},
+        )
+
+        self.assertEqual(agent._format_source_label(doc), "个人信息库/profile.md")
+
     def test_to_openai_messages_merges_system_context_for_provider_compatibility(self) -> None:
         agent = MedicalAgent.__new__(MedicalAgent)
         agent.provider = "minimax"
@@ -214,6 +261,7 @@ class MedicalAgentTests(unittest.TestCase):
         self.assertTrue(payload["knowledge_hit"])
         self.assertEqual(payload["retrieved_doc_count"], 1)
         self.assertEqual(payload["source_labels"], ["products.md"])
+        self.assertEqual(payload["knowledge_bases_hit"], ["medical"])
         self.assertEqual(payload["status"], "success")
         self.assertEqual(payload["question_redacted"], "二甲双胍怎么吃")
 

@@ -103,6 +103,23 @@ class RetrieverTests(unittest.TestCase):
             self.assertEqual(docs[0].metadata["source_file"], str(path))
             self.assertNotIn("medagent_source_url", docs[0].page_content)
 
+    def test_custom_knowledge_dir_and_base_are_recorded_in_metadata(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "profile.md"
+            path.write_text("过敏史：青霉素。", encoding="utf-8")
+
+            retriever = KnowledgeRetriever(
+                embedding_provider="none",
+                knowledge_dir=tmpdir,
+                knowledge_base="personal",
+                index_namespace="test-personal",
+            )
+
+            self.assertEqual(len(retriever.documents), 1)
+            self.assertEqual(retriever.documents[0].metadata["knowledge_base"], "personal")
+            self.assertEqual(retriever.documents[0].metadata["knowledge_dir"], str(Path(tmpdir)))
+            self.assertIn("过敏史", retriever.documents[0].page_content)
+
     def test_keyword_search_returns_matching_chunk(self) -> None:
         retriever = KnowledgeRetriever.__new__(KnowledgeRetriever)
         retriever.chunks = [

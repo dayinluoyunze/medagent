@@ -19,6 +19,8 @@ from config import (
     DEFAULT_PROVIDER,
     EMBEDDING_PROVIDER,
     LOG_DIR,
+    MEDICAL_KNOWLEDGE_DIR,
+    PERSONAL_KNOWLEDGE_DIR,
     get_provider_config,
 )
 from rag.knowledge_manager import (
@@ -53,6 +55,19 @@ EXAMPLE_PROMPTS = [
     "阿莫西林常见的不良反应有哪些？",
     "哺乳期使用感冒药需要注意什么？",
 ]
+
+KNOWLEDGE_STORES = {
+    "medical": {
+        "label": "医疗知识库",
+        "dir": MEDICAL_KNOWLEDGE_DIR,
+        "caption": "说明书、指南、药品 FAQ 等医学资料。",
+    },
+    "personal": {
+        "label": "个人信息库",
+        "dir": PERSONAL_KNOWLEDGE_DIR,
+        "caption": "用户自有背景资料，默认关闭且不会提交到 Git。",
+    },
+}
 
 
 def inject_styles() -> None:
@@ -266,6 +281,16 @@ def init_session_state() -> None:
         st.session_state.knowledge_preview_path = ""
     if "knowledge_delete_confirm_path" not in st.session_state:
         st.session_state.knowledge_delete_confirm_path = ""
+    if "knowledge_preview_store" not in st.session_state:
+        st.session_state.knowledge_preview_store = "medical"
+    if "knowledge_delete_confirm_store" not in st.session_state:
+        st.session_state.knowledge_delete_confirm_store = "medical"
+    if "knowledge_store" not in st.session_state:
+        st.session_state.knowledge_store = "medical"
+    if "use_medical_knowledge" not in st.session_state:
+        st.session_state.use_medical_knowledge = APP_CONFIG["medical_knowledge_enabled"]
+    if "use_personal_knowledge" not in st.session_state:
+        st.session_state.use_personal_knowledge = APP_CONFIG["personal_knowledge_enabled"]
 
 
 def get_env_api_key(provider: str) -> str:
@@ -290,6 +315,25 @@ def provider_label(provider: str | None) -> str:
     if not provider:
         return "未初始化"
     return PROVIDER_LABELS.get(provider, provider)
+
+
+def knowledge_store_label(store: str) -> str:
+    return KNOWLEDGE_STORES.get(store, KNOWLEDGE_STORES["medical"])["label"]
+
+
+def knowledge_store_dir(store: str) -> str:
+    return KNOWLEDGE_STORES.get(store, KNOWLEDGE_STORES["medical"])["dir"]
+
+
+def sync_knowledge_flags_to_agent() -> None:
+    if not st.session_state.agent:
+        return
+    if not hasattr(st.session_state.agent, "set_knowledge_enabled"):
+        return
+    st.session_state.agent.set_knowledge_enabled(
+        st.session_state.use_medical_knowledge,
+        st.session_state.use_personal_knowledge,
+    )
 
 
 def current_key_source(provider: str, api_key_input: str) -> str:
@@ -347,7 +391,13 @@ def get_runtime_snapshot() -> dict[str, Any]:
         "actual_retrieval_mode": "未初始化",
         "vector_ready": False,
         "retriever_error": "",
+        "medical_retriever_error": "",
+        "personal_retriever_error": "",
         "documents": 0,
+        "medical_documents": 0,
+        "personal_documents": 0,
+        "medical_knowledge_enabled": st.session_state.use_medical_knowledge,
+        "personal_knowledge_enabled": st.session_state.use_personal_knowledge,
         "message_count": 0,
         "memory_enabled": APP_CONFIG["memory_enabled"],
         "summary_present": False,
@@ -369,17 +419,50 @@ def get_runtime_snapshot() -> dict[str, Any]:
     snapshot["current_session_title"] = session_meta["title"]
     snapshot["sessions_count"] = len(agent.list_sessions())
 
-    retriever = agent.retriever
-    if retriever is None:
+    medical_retriever = getattr(agent, "medical_retriever", None) or getattr(agent, "retriever", None)
+    personal_retriever = getattr(agent, "personal_retriever", None)
+    snapshot["medical_knowledge_enabled"] = getattr(
+        agent,
+        "medical_knowledge_enabled",
+        st.session_state.use_medical_knowledge,
+    )
+    snapshot["personal_knowledge_enabled"] = getattr(
+        agent,
+        "personal_knowledge_enabled",
+        st.session_state.use_personal_knowledge,
+    )
+    snapshot["medical_retriever_error"] = getattr(agent, "medical_retriever_error", "")
+    snapshot["personal_retriever_error"] = getattr(agent, "personal_retriever_error", "")
+
+    if medical_retriever is None and personal_retriever is None:
         snapshot["retriever_error"] = getattr(agent, "retriever_error", "")
         return snapshot
 
-    snapshot["documents"] = len(retriever.documents)
-    snapshot["vector_ready"] = bool(retriever.vectorstore)
-    snapshot["retriever_error"] = retriever.init_error or getattr(agent, "retriever_error", "")
+    if medical_retriever is not None:
+        snapshot["medical_documents"] = len(medical_retriever.documents)
+    if personal_retriever is not None:
+        snapshot["personal_documents"] = len(personal_retriever.documents)
+
+    enabled_documents = 0
+    if snapshot["medical_knowledge_enabled"]:
+        enabled_documents += snapshot["medical_documents"]
+    if snapshot["personal_knowledge_enabled"]:
+        enabled_documents += snapshot["personal_documents"]
+    snapshot["documents"] = enabled_documents
+    snapshot["vector_ready"] = any(
+        bool(getattr(retriever, "vectorstore", None))
+        for retriever, enabled in (
+            (medical_retriever, snapshot["medical_knowledge_enabled"]),
+            (personal_retriever, snapshot["personal_knowledge_enabled"]),
+        )
+        if enabled and retriever is not None
+    )
+    snapshot["retriever_error"] = getattr(agent, "retriever_error", "")
 
     mode = APP_CONFIG["retrieval_mode"].lower()
-    if EMBEDDING_PROVIDER == "none" or not snapshot["vector_ready"]:
+    if not snapshot["medical_knowledge_enabled"] and not snapshot["personal_knowledge_enabled"]:
+        snapshot["actual_retrieval_mode"] = "off"
+    elif EMBEDDING_PROVIDER == "none" or not snapshot["vector_ready"]:
         snapshot["actual_retrieval_mode"] = "keyword"
     elif mode in {"auto", "hybrid"}:
         snapshot["actual_retrieval_mode"] = "hybrid rerank"
@@ -422,6 +505,7 @@ def init_agent(provider: str, api_key_input: str) -> bool:
         if api_key_input.strip():
             st.session_state.manual_api_keys[provider] = api_key_input.strip()
         st.session_state.agent = create_agent(provider, api_key)
+        sync_knowledge_flags_to_agent()
         st.session_state.provider = provider
         sync_messages_from_agent()
         reset_session_action_state()
@@ -507,6 +591,7 @@ def refresh_retriever_after_knowledge_update(saved_count: int, errors: list[str]
 
     try:
         st.session_state.agent.init_retriever()
+        sync_knowledge_flags_to_agent()
     except Exception as exc:
         st.session_state.status_level = "error"
         st.session_state.status_message = f"资料已保存，但刷新知识库失败：{exc}{error_note}"
@@ -533,6 +618,7 @@ def rebuild_retriever_action() -> None:
 
     try:
         st.session_state.agent.init_retriever()
+        sync_knowledge_flags_to_agent()
     except Exception as exc:
         st.session_state.status_level = "error"
         st.session_state.status_message = f"知识索引重建失败：{exc}"
@@ -548,24 +634,34 @@ def rebuild_retriever_action() -> None:
     st.session_state.status_message = "知识索引已重建。"
 
 
-def delete_knowledge_action(relative_path: str) -> None:
+def delete_knowledge_action(relative_path: str, knowledge_dir: str, store: str) -> None:
     try:
-        deleted_path = delete_uploaded_knowledge(relative_path)
+        deleted_path = delete_uploaded_knowledge(relative_path, knowledge_dir=knowledge_dir)
     except Exception as exc:
         st.session_state.status_level = "error"
         st.session_state.status_message = f"删除资料失败：{exc}"
         return
 
-    if st.session_state.knowledge_preview_path == relative_path:
+    if (
+        st.session_state.knowledge_preview_path == relative_path
+        and st.session_state.knowledge_preview_store == store
+    ):
         st.session_state.knowledge_preview_path = ""
+        st.session_state.knowledge_preview_store = "medical"
     st.session_state.knowledge_delete_confirm_path = ""
+    st.session_state.knowledge_delete_confirm_store = "medical"
     if st.session_state.agent:
         rebuild_retriever_action()
         if st.session_state.status_level == "success":
-            st.session_state.status_message = f"已删除资料并重建索引：{deleted_path.name}"
+            st.session_state.status_message = (
+                f"已从{knowledge_store_label(store)}删除资料并重建索引：{deleted_path.name}"
+            )
     else:
         st.session_state.status_level = "success"
-        st.session_state.status_message = f"已删除资料：{deleted_path.name}。初始化 Agent 后会加载最新知识库。"
+        st.session_state.status_message = (
+            f"已从{knowledge_store_label(store)}删除资料：{deleted_path.name}。"
+            "初始化 Agent 后会加载最新知识库。"
+        )
 
 
 def parse_session_timestamp(value: str) -> datetime | None:
@@ -695,53 +791,76 @@ def render_knowledge_manager() -> None:
     version = st.session_state.knowledge_form_version
 
     with st.expander("知识库", expanded=False):
-        st.caption("上传文件或粘贴文本，保存后写入本地知识库并刷新 RAG。")
+        store = st.radio(
+            "资料保存到",
+            options=["medical", "personal"],
+            format_func=knowledge_store_label,
+            horizontal=True,
+            key="knowledge_store",
+        )
+        knowledge_dir = knowledge_store_dir(store)
+        st.caption(KNOWLEDGE_STORES[store]["caption"])
+        st.caption("上传文件、粘贴文本或导入 URL，保存后写入对应知识库并刷新 RAG。")
         uploaded_files = st.file_uploader(
             "上传资料文件",
             type=file_types,
             accept_multiple_files=True,
-            key=f"knowledge_files_{version}",
+            key=f"knowledge_files_{store}_{version}",
             help="支持 md、txt、json、jsonl、csv、docx、pdf、图片、html、xml、yaml 等可解析文件。扫描版 PDF 和图片需要本机 OCR 环境。",
         )
         text_title = st.text_input(
             "资料标题",
-            key=f"knowledge_title_{version}",
+            key=f"knowledge_title_{store}_{version}",
             placeholder="例如：高血压用药注意事项",
         )
         url_content = st.text_area(
             "从 URL 导入",
-            key=f"knowledge_urls_{version}",
+            key=f"knowledge_urls_{store}_{version}",
             placeholder="每行一个 URL，保存后会抓取网页正文并生成本地知识快照。",
             height=82,
         )
         text_content = st.text_area(
             "粘贴文本",
-            key=f"knowledge_text_{version}",
+            key=f"knowledge_text_{store}_{version}",
             placeholder="可以粘贴说明书片段、指南摘要、内部 FAQ 等文本资料。",
             height=110,
         )
 
-        if st.button("保存并刷新知识库", use_container_width=True, key=f"save_knowledge_{version}"):
+        if st.button("保存并刷新知识库", use_container_width=True, key=f"save_knowledge_{store}_{version}"):
             saved_paths: list[Path] = []
             errors: list[str] = []
 
             for uploaded_file in uploaded_files or []:
                 try:
                     saved_paths.append(
-                        write_uploaded_knowledge(uploaded_file.name, uploaded_file.getvalue())
+                        write_uploaded_knowledge(
+                            uploaded_file.name,
+                            uploaded_file.getvalue(),
+                            knowledge_dir=knowledge_dir,
+                        )
                     )
                 except Exception as exc:
                     errors.append(f"{uploaded_file.name}: {exc}")
 
             if text_content.strip():
                 try:
-                    saved_paths.append(write_text_knowledge(text_title, text_content))
+                    saved_paths.append(
+                        write_text_knowledge(
+                            text_title,
+                            text_content,
+                            knowledge_dir=knowledge_dir,
+                        )
+                    )
                 except Exception as exc:
                     errors.append(f"文本资料: {exc}")
 
             if url_content.strip():
                 with st.spinner("正在抓取 URL 并生成知识快照..."):
-                    url_paths, url_errors = write_url_knowledge(url_content, text_title)
+                    url_paths, url_errors = write_url_knowledge(
+                        url_content,
+                        text_title,
+                        knowledge_dir=knowledge_dir,
+                    )
                 saved_paths.extend(url_paths)
                 errors.extend(url_errors)
 
@@ -770,13 +889,16 @@ def render_knowledge_manager() -> None:
             if st.button("刷新列表", use_container_width=True, key="refresh_knowledge_files"):
                 st.rerun()
 
-        knowledge_files = list_knowledge_files(limit=80)
+        knowledge_files = list_knowledge_files(knowledge_dir=knowledge_dir, limit=80)
         if not knowledge_files:
-            st.caption("知识库暂无可加载资料。")
+            st.caption(f"{knowledge_store_label(store)}暂无可加载资料。")
             return
 
         uploaded_count = sum(1 for item in knowledge_files if item["deletable"])
-        st.caption(f"知识文件：{len(knowledge_files)} 个，其中网页添加 {uploaded_count} 个。")
+        st.caption(
+            f"{knowledge_store_label(store)}文件：{len(knowledge_files)} 个，"
+            f"其中网页添加 {uploaded_count} 个。"
+        )
 
         options = [item["relative_path"] for item in knowledge_files]
         selected_path = st.selectbox(
@@ -790,7 +912,7 @@ def render_knowledge_manager() -> None:
                 ),
                 value,
             ),
-            key="knowledge_file_selector",
+            key=f"knowledge_file_selector_{store}",
         )
         selected_item = next(
             (item for item in knowledge_files if item["relative_path"] == selected_path),
@@ -805,37 +927,59 @@ def render_knowledge_manager() -> None:
         )
         file_cols = st.columns(2, gap="small")
         with file_cols[0]:
-            if st.button("预览", use_container_width=True, key=f"preview_{abs(hash(selected_path))}"):
+            if st.button("预览", use_container_width=True, key=f"preview_{store}_{abs(hash(selected_path))}"):
                 st.session_state.knowledge_preview_path = selected_path
+                st.session_state.knowledge_preview_store = store
                 st.session_state.knowledge_delete_confirm_path = ""
+                st.session_state.knowledge_delete_confirm_store = "medical"
                 st.rerun()
         with file_cols[1]:
             if st.button(
                 "删除",
                 use_container_width=True,
                 disabled=not selected_item["deletable"],
-                key=f"delete_{abs(hash(selected_path))}",
+                key=f"delete_{store}_{abs(hash(selected_path))}",
             ):
                 st.session_state.knowledge_delete_confirm_path = selected_path
+                st.session_state.knowledge_delete_confirm_store = store
                 st.session_state.knowledge_preview_path = ""
+                st.session_state.knowledge_preview_store = "medical"
                 st.rerun()
 
-        if st.session_state.knowledge_preview_path == selected_path:
+        if (
+            st.session_state.knowledge_preview_path == selected_path
+            and st.session_state.knowledge_preview_store == store
+        ):
             try:
-                st.code(read_knowledge_preview(selected_path), language="markdown")
+                st.code(
+                    read_knowledge_preview(selected_path, knowledge_dir=knowledge_dir),
+                    language="markdown",
+                )
             except Exception as exc:
                 st.warning(f"预览失败：{exc}")
 
-        if st.session_state.knowledge_delete_confirm_path == selected_path:
+        if (
+            st.session_state.knowledge_delete_confirm_path == selected_path
+            and st.session_state.knowledge_delete_confirm_store == store
+        ):
             st.warning("只允许删除网页上传/导入的资料，删除后会刷新索引。")
             confirm_cols = st.columns(2, gap="small")
             with confirm_cols[0]:
-                if st.button("确认删除", use_container_width=True, key=f"delete_confirm_{abs(hash(selected_path))}"):
-                    delete_knowledge_action(selected_path)
+                if st.button(
+                    "确认删除",
+                    use_container_width=True,
+                    key=f"delete_confirm_{store}_{abs(hash(selected_path))}",
+                ):
+                    delete_knowledge_action(selected_path, knowledge_dir, store)
                     st.rerun()
             with confirm_cols[1]:
-                if st.button("取消", use_container_width=True, key=f"delete_cancel_{abs(hash(selected_path))}"):
+                if st.button(
+                    "取消",
+                    use_container_width=True,
+                    key=f"delete_cancel_{store}_{abs(hash(selected_path))}",
+                ):
                     st.session_state.knowledge_delete_confirm_path = ""
+                    st.session_state.knowledge_delete_confirm_store = "medical"
                     st.rerun()
 
 
@@ -863,6 +1007,19 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
         )
         set_api_key_input(selected_provider, api_key_input)
 
+        st.caption("知识库参与回答")
+        st.checkbox(
+            "启用医疗知识库",
+            key="use_medical_knowledge",
+            help="关闭后，说明书、指南等医疗资料不会进入模型上下文。",
+        )
+        st.checkbox(
+            "启用个人信息库",
+            key="use_personal_knowledge",
+            help="关闭后，个人背景资料不会进入模型上下文。个人库默认关闭。",
+        )
+        sync_knowledge_flags_to_agent()
+
         action_cols = st.columns(2, gap="small")
         with action_cols[0]:
             if st.button("初始化", type="primary", use_container_width=True):
@@ -880,7 +1037,14 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
             st.caption(f"当前标题：`{snapshot['current_session_title'] or '-'} `")
             st.caption(f"Embedding：`{EMBEDDING_PROVIDER}`")
             st.caption(f"检索模式：`{snapshot['actual_retrieval_mode']}`")
-            st.caption(f"知识文档：`{snapshot['documents']}`")
+            st.caption(
+                f"医疗知识：`{'on' if snapshot['medical_knowledge_enabled'] else 'off'}` · "
+                f"`{snapshot['medical_documents']}`"
+            )
+            st.caption(
+                f"个人信息：`{'on' if snapshot['personal_knowledge_enabled'] else 'off'}` · "
+                f"`{snapshot['personal_documents']}`"
+            )
             st.caption(f"OCR：`{'可用' if ocr_status['available'] else '不可用'}`")
             if not ocr_status["available"]:
                 st.caption(f"OCR 原因：`{ocr_status['reason']}`")
@@ -908,7 +1072,8 @@ def render_header(snapshot: dict[str, Any]) -> None:
         f"会话 {snapshot['current_session_title'] or '未命名'}",
         f"会话 {snapshot['active_provider_label']}",
         f"检索 {snapshot['actual_retrieval_mode']}",
-        f"Embedding {EMBEDDING_PROVIDER}",
+        f"医疗库 {'on' if snapshot['medical_knowledge_enabled'] else 'off'}",
+        f"个人库 {'on' if snapshot['personal_knowledge_enabled'] else 'off'}",
     ]
     if snapshot["summary_present"]:
         pills.append("Memory on")
@@ -983,7 +1148,7 @@ def render_chat_workspace(snapshot: dict[str, Any]) -> None:
             f"""
 <div class="starter-card">
   <strong>当前会话已就绪。</strong><br>
-  会话：{snapshot['current_session_title'] or '未命名'} · 模型：{snapshot['active_provider_label']} · 检索：{snapshot['actual_retrieval_mode']} · 知识文档：{snapshot['documents']}<br>
+  会话：{snapshot['current_session_title'] or '未命名'} · 模型：{snapshot['active_provider_label']} · 检索：{snapshot['actual_retrieval_mode']} · 已启用知识文档：{snapshot['documents']}<br>
   你可以直接输入问题，或者先点下面的示例问题。
 </div>
             """,

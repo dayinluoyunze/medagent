@@ -99,6 +99,8 @@ APP_CONFIG = {
     "remote_knowledge_allowlist": _get_env_list("REMOTE_KNOWLEDGE_ALLOWLIST"),
     "allow_url_knowledge_ingestion": _get_env_bool("ALLOW_URL_KNOWLEDGE_INGESTION", True),
     "url_knowledge_max_bytes": int(os.getenv("URL_KNOWLEDGE_MAX_BYTES", str(10 * 1024 * 1024))),
+    "medical_knowledge_enabled": _get_env_bool("MEDICAL_KNOWLEDGE_ENABLED", True),
+    "personal_knowledge_enabled": _get_env_bool("PERSONAL_KNOWLEDGE_ENABLED", False),
     "ocr_enabled": _get_env_bool("OCR_ENABLED", True),
     "ocr_lang": os.getenv("OCR_LANG", "chi_sim+eng"),
     "ocr_dpi": int(os.getenv("OCR_DPI", "200")),
@@ -108,6 +110,8 @@ APP_CONFIG = {
 }
 
 KNOWLEDGE_DIR = "knowledge"
+MEDICAL_KNOWLEDGE_DIR = os.getenv("MEDICAL_KNOWLEDGE_DIR", KNOWLEDGE_DIR)
+PERSONAL_KNOWLEDGE_DIR = os.getenv("PERSONAL_KNOWLEDGE_DIR", "personal_knowledge")
 VECTORSTORE_DIR = os.getenv("VECTORSTORE_DIR", os.path.join(".cache", "vectorstore"))
 VECTORSTORE_MANIFEST = "manifest.json"
 MEMORY_DIR = os.getenv("MEMORY_DIR", "memory")
