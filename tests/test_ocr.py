@@ -53,6 +53,8 @@ class OcrTests(unittest.TestCase):
         original_image = ocr_module.Image
         original_image_ops = ocr_module.ImageOps
         original_tesseract = ocr_module.pytesseract
+        original_resolve_cmd = ocr_module._resolve_tesseract_cmd
+        original_resolve_tessdata = ocr_module._resolve_tessdata_prefix
         original_enabled = APP_CONFIG["ocr_enabled"]
 
         fake_image_module = Mock()
@@ -66,6 +68,8 @@ class OcrTests(unittest.TestCase):
         ocr_module.Image = fake_image_module
         ocr_module.ImageOps = fake_ops
         ocr_module.pytesseract = fake_tesseract
+        ocr_module._resolve_tesseract_cmd = lambda: "tesseract"
+        ocr_module._resolve_tessdata_prefix = lambda: ""
         APP_CONFIG["ocr_enabled"] = True
         try:
             self.assertEqual(ocr_module.image_bytes_to_text(b"image"), "二甲双胍 OCR")
@@ -73,6 +77,8 @@ class OcrTests(unittest.TestCase):
             ocr_module.Image = original_image
             ocr_module.ImageOps = original_image_ops
             ocr_module.pytesseract = original_tesseract
+            ocr_module._resolve_tesseract_cmd = original_resolve_cmd
+            ocr_module._resolve_tessdata_prefix = original_resolve_tessdata
             APP_CONFIG["ocr_enabled"] = original_enabled
 
 
