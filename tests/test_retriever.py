@@ -132,6 +132,68 @@ class RetrieverTests(unittest.TestCase):
         self.assertTrue(docs)
         self.assertIn("二甲双胍", docs[0].page_content)
 
+    def test_markdown_sections_keep_faq_items_separate(self) -> None:
+        retriever = KnowledgeRetriever.__new__(KnowledgeRetriever)
+        doc = Document(
+            page_content=(
+                "# FAQ\n\n"
+                "## 产品相关\n\n"
+                "### Q1: 厄贝沙坦片和缬沙坦有什么区别？\n"
+                "A: 两者都属于ARB类降压药。\n\n"
+                "### Q2: 二甲双胍片可以长期服用吗？\n"
+                "A: 二甲双胍是2型糖尿病的一线用药。"
+            ),
+            metadata={"source": "knowledge/qa.md", "file_type": ".md"},
+        )
+
+        sections = retriever._split_document_by_markdown_sections(doc)
+
+        self.assertTrue(any("Q1" in section.page_content for section in sections))
+        q1_section = next(section for section in sections if "Q1" in section.page_content)
+        self.assertNotIn("二甲双胍", q1_section.page_content)
+
+    def test_similarity_search_filters_lower_overlap_sibling_section(self) -> None:
+        retriever = KnowledgeRetriever.__new__(KnowledgeRetriever)
+        retriever.vectorstore = None
+        retriever.init_error = ""
+        retriever.chunks = [
+            Document(
+                page_content="## 药品A（降压药）\n### 不良反应\n常见：头晕、头痛。",
+                metadata={"source": "knowledge/products.md", "file_type": ".md"},
+            ),
+            Document(
+                page_content="## 药品B（降糖药）\n### 不良反应\n常见：胃肠道反应。",
+                metadata={"source": "knowledge/products.md", "file_type": ".md"},
+            ),
+        ]
+
+        docs = retriever.similarity_search("降压药常见副作用有哪些？", k=4)
+
+        self.assertEqual(len(docs), 1)
+        self.assertIn("降压药", docs[0].page_content)
+        self.assertNotIn("降糖药", docs[0].page_content)
+
+    def test_similarity_search_supports_new_knowledge_without_hardcoded_entities(self) -> None:
+        retriever = KnowledgeRetriever.__new__(KnowledgeRetriever)
+        retriever.vectorstore = None
+        retriever.init_error = ""
+        retriever.chunks = [
+            Document(
+                page_content="## 新药X（抗眩晕药）\n### 不良反应\n常见：嗜睡、口干。",
+                metadata={"source": "knowledge/new.md", "file_type": ".md"},
+            ),
+            Document(
+                page_content="## 新药Y（抗过敏药）\n### 不良反应\n常见：皮疹。",
+                metadata={"source": "knowledge/new.md", "file_type": ".md"},
+            ),
+        ]
+
+        docs = retriever.similarity_search("新药X常见副作用有哪些？", k=4)
+
+        self.assertEqual(len(docs), 1)
+        self.assertIn("新药X", docs[0].page_content)
+        self.assertNotIn("新药Y", docs[0].page_content)
+
     def test_similarity_search_falls_back_when_vector_query_fails(self) -> None:
         retriever = KnowledgeRetriever.__new__(KnowledgeRetriever)
         retriever.vectorstore = Mock()

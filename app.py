@@ -5,6 +5,7 @@ Minimal Streamlit web app for the medical agent.
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from config import (
     APP_CONFIG,
     CHAT_METRICS_FILENAME,
     DEFAULT_PROVIDER,
+    EMBEDDING_MODELS,
     EMBEDDING_PROVIDER,
     LOG_DIR,
     MEDICAL_KNOWLEDGE_DIR,
@@ -49,12 +51,28 @@ PROVIDER_LABELS = {
     "minimax": "MiniMax",
 }
 
+EMBEDDING_PROVIDER_LABELS = {
+    "none": "关闭向量检索（Keyword）",
+    "openai": "OpenAI Embeddings",
+    "modelscope": "ModelScope Embeddings",
+}
+
+EMBEDDING_PROVIDER_OPTIONS = list(EMBEDDING_MODELS.keys()) + ["none"]
+
 EXAMPLE_PROMPTS = [
-    "二甲双胍应该饭前吃还是饭后吃？",
-    "忘记服用降压药时应该怎么处理？",
-    "阿莫西林常见的不良反应有哪些？",
-    "哺乳期使用感冒药需要注意什么？",
+    "某个药品应该饭前吃还是饭后吃？",
+    "忘记服药时应该怎么处理？",
+    "某个药品常见的不良反应有哪些？",
+    "哺乳期用药需要注意什么？",
 ]
+
+SECTION_HEADER_PATTERN = re.compile(
+    r"(?m)^(?:#{1,6}\s*)?(回答依据|思考过程|推理过程|分析过程|参考来源|参考文献|References)\s*[:：]?\s*$"
+)
+THINK_BLOCK_PATTERN = re.compile(r"(?is)<think\b[^>]*>.*?</think\s*>")
+THINK_OPEN_PATTERN = re.compile(r"(?is)<think\b[^>]*>.*")
+HTML_THINK_BLOCK_PATTERN = re.compile(r"(?is)&lt;think\b.*?&lt;/think\s*&gt;")
+HTML_THINK_OPEN_PATTERN = re.compile(r"(?is)&lt;think\b.*")
 
 KNOWLEDGE_STORES = {
     "medical": {
@@ -65,7 +83,7 @@ KNOWLEDGE_STORES = {
     "personal": {
         "label": "个人信息库",
         "dir": PERSONAL_KNOWLEDGE_DIR,
-        "caption": "用户自有背景资料，默认关闭且不会提交到 Git。",
+        "caption": "用户自有背景资料。",
     },
 }
 
@@ -259,6 +277,12 @@ def init_session_state() -> None:
         st.session_state.messages = []
     if "provider" not in st.session_state:
         st.session_state.provider = DEFAULT_PROVIDER
+    if "embedding_provider" not in st.session_state:
+        st.session_state.embedding_provider = (
+            EMBEDDING_PROVIDER
+            if EMBEDDING_PROVIDER in EMBEDDING_PROVIDER_OPTIONS
+            else "none"
+        )
     if "status_message" not in st.session_state:
         st.session_state.status_message = ""
     if "status_level" not in st.session_state:
@@ -311,10 +335,24 @@ def set_api_key_input(provider: str, value: str) -> None:
     st.session_state.api_key_inputs[provider] = value
 
 
+def get_embedding_api_key_input(provider: str) -> str:
+    return st.session_state.api_key_inputs.get(f"embedding:{provider}", "")
+
+
+def set_embedding_api_key_input(provider: str, value: str) -> None:
+    st.session_state.api_key_inputs[f"embedding:{provider}"] = value
+
+
 def provider_label(provider: str | None) -> str:
     if not provider:
         return "未初始化"
     return PROVIDER_LABELS.get(provider, provider)
+
+
+def embedding_provider_label(provider: str | None) -> str:
+    if not provider:
+        return "未初始化"
+    return EMBEDDING_PROVIDER_LABELS.get(provider, provider)
 
 
 def knowledge_store_label(store: str) -> str:
@@ -342,6 +380,38 @@ def current_key_source(provider: str, api_key_input: str) -> str:
     if get_env_api_key(provider):
         return ".env"
     return "缺失"
+
+
+def embedding_key_source(
+    embedding_provider: str,
+    embedding_api_key_input: str,
+    chat_provider: str,
+    chat_api_key_input: str,
+) -> str:
+    if embedding_provider == "none":
+        return "不使用"
+    if embedding_api_key_input.strip():
+        return "手动输入"
+    if embedding_provider == chat_provider and chat_api_key_input.strip():
+        return "复用聊天 Key"
+    if get_env_api_key(embedding_provider):
+        return ".env"
+    return "缺失"
+
+
+def resolve_embedding_api_key(
+    embedding_provider: str,
+    embedding_api_key_input: str,
+    chat_provider: str,
+    chat_api_key: str,
+) -> str:
+    if embedding_provider == "none":
+        return ""
+    if embedding_api_key_input.strip():
+        return embedding_api_key_input.strip()
+    if embedding_provider == chat_provider and chat_api_key:
+        return chat_api_key
+    return get_env_api_key(embedding_provider)
 
 
 def copy_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -378,16 +448,33 @@ def reset_session_action_state() -> None:
 def get_runtime_snapshot() -> dict[str, Any]:
     agent = st.session_state.agent
     selected_provider = st.session_state.provider
+    selected_embedding_provider = st.session_state.embedding_provider
     selected_provider_config = get_provider_config(selected_provider)
+    selected_embedding_config = get_provider_config(
+        selected_embedding_provider,
+        for_embedding=True,
+    )
 
     snapshot: dict[str, Any] = {
         "selected_provider": selected_provider,
         "selected_provider_label": provider_label(selected_provider),
         "selected_model": selected_provider_config["model"],
         "selected_key_source": current_key_source(selected_provider, get_api_key_input(selected_provider)),
+        "selected_embedding_provider": selected_embedding_provider,
+        "selected_embedding_provider_label": embedding_provider_label(selected_embedding_provider),
+        "selected_embedding_model": selected_embedding_config["model"],
+        "selected_embedding_key_source": embedding_key_source(
+            selected_embedding_provider,
+            get_embedding_api_key_input(selected_embedding_provider),
+            selected_provider,
+            get_api_key_input(selected_provider),
+        ),
         "active_provider": None,
         "active_provider_label": "未初始化",
         "active_model": "-",
+        "active_embedding_provider": None,
+        "active_embedding_provider_label": "未初始化",
+        "active_embedding_model": "-",
         "actual_retrieval_mode": "未初始化",
         "vector_ready": False,
         "retriever_error": "",
@@ -412,6 +499,14 @@ def get_runtime_snapshot() -> dict[str, Any]:
     snapshot["active_provider"] = agent.provider
     snapshot["active_provider_label"] = provider_label(agent.provider)
     snapshot["active_model"] = agent.provider_config["model"]
+    snapshot["active_embedding_provider"] = getattr(agent, "embedding_provider", EMBEDDING_PROVIDER)
+    snapshot["active_embedding_provider_label"] = embedding_provider_label(
+        snapshot["active_embedding_provider"]
+    )
+    snapshot["active_embedding_model"] = get_provider_config(
+        snapshot["active_embedding_provider"],
+        for_embedding=True,
+    )["model"]
     snapshot["message_count"] = len(agent.conversation_history)
     snapshot["summary_present"] = bool(agent.summary_memory.strip())
     session_meta = agent.get_session_meta()
@@ -462,7 +557,7 @@ def get_runtime_snapshot() -> dict[str, Any]:
     mode = APP_CONFIG["retrieval_mode"].lower()
     if not snapshot["medical_knowledge_enabled"] and not snapshot["personal_knowledge_enabled"]:
         snapshot["actual_retrieval_mode"] = "off"
-    elif EMBEDDING_PROVIDER == "none" or not snapshot["vector_ready"]:
+    elif snapshot["active_embedding_provider"] == "none" or not snapshot["vector_ready"]:
         snapshot["actual_retrieval_mode"] = "keyword"
     elif mode in {"auto", "hybrid"}:
         snapshot["actual_retrieval_mode"] = "hybrid rerank"
@@ -494,19 +589,41 @@ def show_status(message: str, level: str) -> None:
         st.info(message)
 
 
-def init_agent(provider: str, api_key_input: str) -> bool:
+def init_agent(
+    provider: str,
+    api_key_input: str,
+    embedding_provider: str,
+    embedding_api_key_input: str,
+) -> bool:
     api_key = api_key_input.strip() or get_env_api_key(provider)
     if not api_key:
         st.session_state.status_level = "error"
         st.session_state.status_message = "缺少当前 provider 的 API Key。请手动输入，或先在 .env 里配置。"
         return False
 
+    embedding_api_key = resolve_embedding_api_key(
+        embedding_provider,
+        embedding_api_key_input,
+        provider,
+        api_key,
+    )
+
     try:
         if api_key_input.strip():
             st.session_state.manual_api_keys[provider] = api_key_input.strip()
-        st.session_state.agent = create_agent(provider, api_key)
+        if embedding_api_key_input.strip():
+            st.session_state.manual_api_keys[f"embedding:{embedding_provider}"] = (
+                embedding_api_key_input.strip()
+            )
+        st.session_state.agent = create_agent(
+            provider,
+            api_key,
+            embedding_provider,
+            embedding_api_key,
+        )
         sync_knowledge_flags_to_agent()
         st.session_state.provider = provider
+        st.session_state.embedding_provider = embedding_provider
         sync_messages_from_agent()
         reset_session_action_state()
 
@@ -998,6 +1115,8 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
             format_func=lambda value: PROVIDER_LABELS[value],
         )
         st.session_state.provider = selected_provider
+        selected_provider_config = get_provider_config(selected_provider)
+        st.caption(f"主模型：`{selected_provider_config['model']}`")
 
         api_key_input = st.text_input(
             "API Key",
@@ -1006,6 +1125,32 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
             help="留空则回退到 .env 中当前 provider 对应的 key。",
         )
         set_api_key_input(selected_provider, api_key_input)
+
+        selected_embedding_provider = st.selectbox(
+            "Embedding 模型",
+            options=EMBEDDING_PROVIDER_OPTIONS,
+            index=EMBEDDING_PROVIDER_OPTIONS.index(st.session_state.embedding_provider),
+            format_func=embedding_provider_label,
+            help="Embedding 只用于知识库向量化和检索，可与聊天模型不同；选择关闭时使用关键词检索。",
+        )
+        st.session_state.embedding_provider = selected_embedding_provider
+
+        embedding_api_key_input = ""
+        if selected_embedding_provider != "none":
+            embedding_api_key_input = st.text_input(
+                "Embedding API Key",
+                type="password",
+                value=get_embedding_api_key_input(selected_embedding_provider),
+                help="留空则优先复用同 provider 的聊天 Key，否则读取 .env 中对应 provider 的 key。",
+            )
+            set_embedding_api_key_input(selected_embedding_provider, embedding_api_key_input)
+            selected_embedding_config = get_provider_config(
+                selected_embedding_provider,
+                for_embedding=True,
+            )
+            st.caption(f"Embedding 模型：`{selected_embedding_config['model']}`")
+        else:
+            st.caption("Embedding 已关闭：知识库使用本地关键词检索。")
 
         st.caption("知识库参与回答")
         st.checkbox(
@@ -1023,7 +1168,12 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
         action_cols = st.columns(2, gap="small")
         with action_cols[0]:
             if st.button("初始化", type="primary", use_container_width=True):
-                init_agent(selected_provider, api_key_input)
+                init_agent(
+                    selected_provider,
+                    api_key_input,
+                    selected_embedding_provider,
+                    embedding_api_key_input,
+                )
         with action_cols[1]:
             if st.button("新建会话", use_container_width=True):
                 clear_session_and_memory()
@@ -1035,7 +1185,8 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
             st.caption(f"当前会话：`{snapshot['active_provider_label']}`")
             st.caption(f"当前模型：`{snapshot['active_model']}`")
             st.caption(f"当前标题：`{snapshot['current_session_title'] or '-'} `")
-            st.caption(f"Embedding：`{EMBEDDING_PROVIDER}`")
+            st.caption(f"Embedding：`{snapshot['active_embedding_provider_label']}`")
+            st.caption(f"Embedding 模型：`{snapshot['active_embedding_model'] or '-'}`")
             st.caption(f"检索模式：`{snapshot['actual_retrieval_mode']}`")
             st.caption(
                 f"医疗知识：`{'on' if snapshot['medical_knowledge_enabled'] else 'off'}` · "
@@ -1049,7 +1200,8 @@ def render_sidebar(snapshot: dict[str, Any]) -> None:
             if not ocr_status["available"]:
                 st.caption(f"OCR 原因：`{ocr_status['reason']}`")
             st.caption(f"消息数量：`{snapshot['message_count']}`")
-            st.caption(f"Key 来源：`{snapshot['selected_key_source']}`")
+            st.caption(f"聊天 Key 来源：`{snapshot['selected_key_source']}`")
+            st.caption(f"Embedding Key 来源：`{snapshot['selected_embedding_key_source']}`")
             if snapshot["retriever_error"]:
                 st.warning(snapshot["retriever_error"])
 
@@ -1071,6 +1223,7 @@ def render_header(snapshot: dict[str, Any]) -> None:
     pills = [
         f"会话 {snapshot['current_session_title'] or '未命名'}",
         f"会话 {snapshot['active_provider_label']}",
+        f"Embedding {snapshot['active_embedding_provider_label']}",
         f"检索 {snapshot['actual_retrieval_mode']}",
         f"医疗库 {'on' if snapshot['medical_knowledge_enabled'] else 'off'}",
         f"个人库 {'on' if snapshot['personal_knowledge_enabled'] else 'off'}",
@@ -1108,10 +1261,70 @@ def render_example_prompts(enabled: bool) -> None:
                 st.rerun()
 
 
+def split_assistant_sections(content: str) -> dict[str, str]:
+    content = strip_think_blocks(content)
+    matches = list(SECTION_HEADER_PATTERN.finditer(content))
+    if not matches:
+        return {"answer": content.strip(), "reasoning": "", "sources": ""}
+
+    answer_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    source_parts: list[str] = []
+    cursor = 0
+
+    for index, match in enumerate(matches):
+        if index == 0:
+            answer_parts.append(content[cursor : match.start()])
+        next_start = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        section_body = content[match.end() : next_start].strip()
+        header = match.group(1).lower()
+
+        if header in {"参考来源", "参考文献", "references"}:
+            source_parts.append(section_body)
+        elif header in {"回答依据", "思考过程", "推理过程", "分析过程"}:
+            reasoning_parts.append(section_body)
+        else:
+            answer_parts.append(content[match.start() : next_start])
+
+        cursor = next_start
+
+    if not answer_parts:
+        answer_parts.append(content[: matches[0].start()])
+
+    return {
+        "answer": "\n\n".join(part.strip() for part in answer_parts if part.strip()).strip(),
+        "reasoning": "\n\n".join(part for part in reasoning_parts if part).strip(),
+        "sources": "\n\n".join(part for part in source_parts if part).strip(),
+    }
+
+
+def strip_think_blocks(content: str) -> str:
+    sanitized = str(content or "")
+    sanitized = HTML_THINK_BLOCK_PATTERN.sub("", sanitized)
+    sanitized = HTML_THINK_OPEN_PATTERN.sub("", sanitized)
+    sanitized = THINK_BLOCK_PATTERN.sub("", sanitized)
+    sanitized = THINK_OPEN_PATTERN.sub("", sanitized)
+    sanitized = re.sub(r"(?is)</think\s*>", "", sanitized)
+    sanitized = re.sub(r"(?is)&lt;/think\s*&gt;", "", sanitized)
+    return re.sub(r"\n{3,}", "\n\n", sanitized).strip()
+
+
 def display_message(role: str, content: str) -> None:
     avatar = "🧑" if role == "user" else "💊"
     with st.chat_message(role, avatar=avatar):
-        st.markdown(content)
+        if role != "assistant":
+            st.markdown(content)
+            return
+
+        sections = split_assistant_sections(content)
+        if sections["answer"]:
+            st.markdown(sections["answer"])
+        if sections["reasoning"]:
+            with st.expander("回答依据", expanded=False):
+                st.markdown(sections["reasoning"])
+        if sections["sources"]:
+            with st.expander("参考来源", expanded=False):
+                st.markdown(sections["sources"])
 
 
 def process_prompt(prompt: str) -> None:

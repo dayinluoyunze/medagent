@@ -2,11 +2,13 @@ import json
 import unittest
 from pathlib import Path
 import shutil
+from tempfile import TemporaryDirectory
 import uuid
 
 from langchain_core.documents import Document
 
 from agents.medical_agent import MedicalAgent
+from rag.retriever import KnowledgeRetriever
 
 
 class MedicalAgentTests(unittest.TestCase):
@@ -29,6 +31,17 @@ class MedicalAgentTests(unittest.TestCase):
         self.assertIn("[EMAIL]", sanitized)
         self.assertIn("[ID]", sanitized)
         self.assertIn("[AGE]", sanitized)
+
+    def test_sanitize_model_output_removes_think_blocks(self) -> None:
+        agent = MedicalAgent.__new__(MedicalAgent)
+
+        sanitized = agent._sanitize_model_output(
+            "<think>这里是模型内部推理，不应展示。</think>\n\n最终回答。"
+        )
+
+        self.assertEqual(sanitized, "最终回答。")
+        self.assertNotIn("内部推理", sanitized)
+        self.assertNotIn("<think>", sanitized)
 
     def test_append_sources_deduplicates_and_formats_labels(self) -> None:
         agent = MedicalAgent.__new__(MedicalAgent)
@@ -103,6 +116,80 @@ class MedicalAgentTests(unittest.TestCase):
         self.assertIn("【个人信息库】", context)
         self.assertIn("个人信息片段", context)
         self.assertEqual(len(docs), 2)
+
+    def test_retrieve_context_with_real_retrievers_respects_store_switches(self) -> None:
+        with TemporaryDirectory() as medical_dir, TemporaryDirectory() as personal_dir:
+            Path(medical_dir, "nail-care.md").write_text(
+                "# 皮肤科知识\n\n"
+                "## 指甲分层开裂\n\n"
+                "### 日常护理\n"
+                "指甲分层开裂时，应减少清洁剂刺激，保持指甲干燥，并避免频繁美甲。\n",
+                encoding="utf-8",
+            )
+            Path(personal_dir, "profile.md").write_text(
+                "# 个人资料\n\n"
+                "## 生活习惯\n"
+                "用户长期夜班，手部经常接触清洁剂，近期指甲开裂在做清洁后更明显。\n\n"
+                "## 过敏史\n"
+                "用户自述对青霉素过敏。\n",
+                encoding="utf-8",
+            )
+
+            agent = MedicalAgent.__new__(MedicalAgent)
+            agent.medical_retriever = KnowledgeRetriever(
+                embedding_provider="none",
+                knowledge_dir=medical_dir,
+                knowledge_base="medical",
+                index_namespace="test-medical",
+            )
+            agent.personal_retriever = KnowledgeRetriever(
+                embedding_provider="none",
+                knowledge_dir=personal_dir,
+                knowledge_base="personal",
+                index_namespace="test-personal",
+            )
+
+            agent.medical_knowledge_enabled = True
+            agent.personal_knowledge_enabled = False
+            context, docs = agent._retrieve_context("指甲分层开裂应该怎么护理？")
+            self.assertIn("【医疗知识库】", context)
+            self.assertIn("指甲分层开裂", context)
+            self.assertNotIn("个人资料", context)
+            self.assertEqual({doc.metadata["knowledge_base"] for doc in docs}, {"medical"})
+
+            agent.medical_knowledge_enabled = False
+            agent.personal_knowledge_enabled = True
+            context, docs = agent._retrieve_context("我的青霉素过敏史是什么？")
+            self.assertIn("【个人信息库】", context)
+            self.assertIn("青霉素过敏", context)
+            self.assertNotIn("皮肤科知识", context)
+            self.assertEqual({doc.metadata["knowledge_base"] for doc in docs}, {"personal"})
+
+            agent.medical_knowledge_enabled = True
+            agent.personal_knowledge_enabled = True
+            context, docs = agent._retrieve_context("指甲开裂和清洁剂刺激有关吗？")
+            self.assertIn("【医疗知识库】", context)
+            self.assertIn("【个人信息库】", context)
+            self.assertEqual(
+                {doc.metadata["knowledge_base"] for doc in docs},
+                {"medical", "personal"},
+            )
+
+            agent.medical_knowledge_enabled = False
+            agent.personal_knowledge_enabled = False
+            context, docs = agent._retrieve_context("指甲分层开裂应该怎么护理？")
+            self.assertEqual(context, "")
+            self.assertEqual(docs, [])
+
+    def test_init_retriever_uses_configured_embedding_provider(self) -> None:
+        agent = MedicalAgent.__new__(MedicalAgent)
+        agent.embedding_provider = "none"
+        agent.embedding_api_key = ""
+
+        agent.init_retriever()
+
+        self.assertEqual(agent.medical_retriever.embedding_provider, "none")
+        self.assertEqual(agent.personal_retriever.embedding_provider, "none")
 
     def test_personal_source_label_is_explicitly_prefixed(self) -> None:
         agent = MedicalAgent.__new__(MedicalAgent)

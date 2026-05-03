@@ -14,6 +14,7 @@ class ConfigTests(unittest.TestCase):
     def test_get_embedding_config_returns_expected_model(self) -> None:
         config = get_provider_config("modelscope", for_embedding=True)
         self.assertEqual(config["model"], "Qwen/Qwen3-Embedding-8B")
+        self.assertEqual(config["model_kwargs"]["encoding_format"], "float")
 
     def test_get_embedding_config_supports_none_provider(self) -> None:
         config = get_provider_config("none", for_embedding=True)

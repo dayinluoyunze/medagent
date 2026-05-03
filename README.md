@@ -15,13 +15,13 @@
 
 ## 核心功能
 
-- 多模型 Provider 切换：支持 `OpenAI`、`ModelScope`、`MiniMax`
+- 多模型 Provider 切换：聊天模型支持 `OpenAI`、`ModelScope`、`MiniMax`，Embedding 模型支持独立选择 `OpenAI`、`ModelScope` 或关闭向量检索
 - 多源知识库接入：支持 `md`、`txt`、`json`、`csv`、`docx`、`pdf`、图片、`html`、网页 URL
 - 网页资料导入：在 UI 中粘贴 URL 后抓取正文或 PDF 文本，生成本地 Markdown 知识快照
 - 知识库管理：支持查看知识文件、预览文本资料、删除网页添加资料、手动重建索引
 - OCR 兜底：扫描版 PDF 和图片资料可通过 Tesseract OCR 抽取文本后入库
 - 检索模式：支持 `vector / hybrid / keyword`，只有 MiniMax API 也能运行
-- RAG 检索：优先使用 `FAISS + Embeddings`
+- RAG 检索：优先使用 `FAISS + Embeddings`，Embedding Provider 可与聊天模型解耦
 - 回退检索：Embedding 不可用或查询期失败时自动退回本地关键词检索
 - 来源展示：回答尾部自动附带命中的知识来源和片段
 - 安全分级：对紧急风险、诊断判断、个体化用药调整做规则级防护
@@ -56,10 +56,12 @@
 
 - 知识导入：采用本地文件 + UI 上传 + URL 快照导入。URL 不在每次索引时实时抓取，而是在用户显式添加时转成 Markdown 快照，保证索引可复现，也避免运行时网络波动影响问答。
 - 文档解析：内置 `md/txt/json/jsonl/csv/docx/pdf/image/html` 解析。HTML 与 URL 页面会先做正文提取，PDF 会抽取页文本并保留页码标记；扫描版 PDF 或图片会走 OCR 兜底。
-- 文本切分：使用 `RecursiveCharacterTextSplitter`，按标题、段落、换行、中文标点逐级切分，`chunk_size=500`、`chunk_overlap=50`，适合中文医药说明书和 FAQ 这类短段落知识。
-- 向量检索：使用 `FAISS + OpenAI-compatible Embeddings`，Provider 可切换到 ModelScope，适合本地 Demo 和简历项目，部署成本低，不依赖独立向量数据库。
+- 文本切分：先按 Markdown 标题切成独立证据块，再用 `RecursiveCharacterTextSplitter` 做长段落二次切分，避免同一文件中相邻主题被混入同一个上下文块。
+- 向量检索：使用 `FAISS + OpenAI-compatible Embeddings`，Embedding Provider 可在 UI 中独立选择 OpenAI、ModelScope 或关闭，适合本地 Demo 和简历项目，部署成本低，不依赖独立向量数据库。
 - 混合检索：支持 `vector / hybrid / keyword`。向量检索负责语义召回，`jieba + 正则 token` 的关键词检索负责药名、剂量、禁忌词等精确命中，并在 Embedding 不可用时兜底。
-- 本地重排：`hybrid` 模式会扩大候选集，再用向量排名、关键词命中和精确匹配分数做 lightweight rerank，避免单纯拼接结果导致高精确命中的片段排在后面。
+- 本地重排：`hybrid` 模式会扩大候选集，再用向量排名、查询关键词覆盖、标题/别名命中和通用医学问法同义词做 lightweight rerank，避免单纯拼接结果导致高精确命中的片段排在后面。
+- 相关性门控：检索结果进入模型上下文前，会基于查询特异词、标题命中、命中词覆盖和相关性分数过滤低相关片段；不依赖内置药品或疾病白名单，知识库可以持续扩充。
+- 上下文呈现：每个证据块都会带来源、相关性分数和命中词，prompt 要求模型忽略明显无关片段；前端会把“回答依据”和“参考来源”折叠，默认只展示主体回答。
 - 索引缓存：基于知识文件内容、Embedding 模型、检索配置生成 manifest；知识库变化后自动重建 FAISS，否则复用本地缓存。
 
 ## 系统架构
@@ -141,6 +143,9 @@ MODELSCOPE_API_KEY=your-modelscope-key
 ALLOW_URL_KNOWLEDGE_INGESTION=true
 MEDICAL_KNOWLEDGE_ENABLED=true
 PERSONAL_KNOWLEDGE_ENABLED=false
+RETRIEVAL_CANDIDATE_MULTIPLIER=5
+RETRIEVAL_MIN_RELEVANCE_SCORE=2.0
+RETRIEVAL_MIN_SIGNAL_OVERLAP=1
 ```
 
 如果你目前只有 MiniMax API，推荐这样配：
@@ -186,12 +191,13 @@ streamlit run app.py
 
 ## 使用流程
 
-1. 在侧边栏选择模型 Provider
-2. 输入对应 API Key，或从 `.env` 自动读取
-3. 点击“初始化 Agent”
-4. 按需打开“启用医疗知识库”和“启用个人信息库”开关；关闭的知识库不会进入模型上下文
-5. 如需补充知识库，在侧边栏“知识库”中选择保存目标，上传文件、粘贴文本或输入 URL 后点击“保存并刷新知识库”
-6. 在主界面输入医药相关问题
+1. 在侧边栏选择聊天模型 Provider
+2. 选择 Embedding Provider；它只影响知识库向量化和召回，可以与聊天模型不同
+3. 输入对应 API Key，或从 `.env` 自动读取；Embedding Key 留空时会优先复用同 Provider 的聊天 Key
+4. 点击“初始化 Agent”
+5. 按需打开“启用医疗知识库”和“启用个人信息库”开关；关闭的知识库不会进入模型上下文
+6. 如需补充知识库，在侧边栏“知识库”中选择保存目标，上传文件、粘贴文本或输入 URL 后点击“保存并刷新知识库”
+7. 在主界面输入医药相关问题
 
 医疗资料默认读取 `knowledge/`，网页添加的医疗资料会保存到 `knowledge/uploads/`。
 个人资料默认读取 `personal_knowledge/`，该目录默认不提交到 Git，且个人信息库默认关闭。
@@ -201,9 +207,9 @@ OCR 依赖本机 Tesseract 程序；如果 Windows 没有安装，可先安装 T
 
 建议尝试以下问题：
 
-- 二甲双胍可以长期服用吗？
+- 某个药品可以长期服用吗？
 - 忘记服药应该怎么处理？
-- 某类降压药适合哺乳期使用吗？
+- 某类药物适合哺乳期使用吗？
 
 ## 评测
 
@@ -247,6 +253,8 @@ python -m pytest
 - markdown memory 持久化
 - 来源拼接
 - 医疗知识库和个人信息库独立开关
+- 回答依据和参考来源折叠渲染
+- 章节级切分、通用相关性门控和低相关片段过滤
 - 检索回退逻辑
 - 知识库上传、预览和删除
 - OCR 状态检测与降级

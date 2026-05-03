@@ -55,6 +55,7 @@ EMBEDDING_MODELS: Dict[str, Dict[str, Any]] = {
         "model": "Qwen/Qwen3-Embedding-8B",
         "api_base": "https://api-inference.modelscope.cn/v1",
         "api_key_env": "MODELSCOPE_API_KEY",
+        "model_kwargs": {"encoding_format": "float"},
     },
 }
 
@@ -92,6 +93,9 @@ APP_CONFIG = {
     "memory_summary_trigger_messages": 12,
     "memory_enabled": _get_env_bool("MEMORY_ENABLED", True),
     "retrieval_mode": os.getenv("RETRIEVAL_MODE", "auto"),
+    "retrieval_candidate_multiplier": int(os.getenv("RETRIEVAL_CANDIDATE_MULTIPLIER", "5")),
+    "retrieval_min_relevance_score": float(os.getenv("RETRIEVAL_MIN_RELEVANCE_SCORE", "2.0")),
+    "retrieval_min_signal_overlap": int(os.getenv("RETRIEVAL_MIN_SIGNAL_OVERLAP", "1")),
     "citation_snippet_length": int(os.getenv("CITATION_SNIPPET_LENGTH", "120")),
     "log_question_max_chars": int(os.getenv("LOG_QUESTION_MAX_CHARS", "160")),
     "log_redact_questions": _get_env_bool("LOG_REDACT_QUESTIONS", True),

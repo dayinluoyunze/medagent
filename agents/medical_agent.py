@@ -36,12 +36,29 @@ from config import (
 from rag.retriever import create_retriever
 
 
+THINK_BLOCK_PATTERN = re.compile(r"(?is)<think\b[^>]*>.*?</think\s*>")
+THINK_OPEN_PATTERN = re.compile(r"(?is)<think\b[^>]*>.*")
+HTML_THINK_BLOCK_PATTERN = re.compile(r"(?is)&lt;think\b.*?&lt;/think\s*&gt;")
+HTML_THINK_OPEN_PATTERN = re.compile(r"(?is)&lt;think\b.*")
+
+
 class MedicalAgent:
     """Medical QA agent with optional retrieval augmentation and markdown memory."""
 
-    def __init__(self, provider: str = DEFAULT_PROVIDER, api_key: str = ""):
+    def __init__(
+        self,
+        provider: str = DEFAULT_PROVIDER,
+        api_key: str = "",
+        embedding_provider: str = EMBEDDING_PROVIDER,
+        embedding_api_key: str = "",
+    ):
         self.provider = provider
         self.api_key = api_key or get_api_key_for_provider(provider)
+        self.embedding_provider = embedding_provider
+        self.embedding_api_key = (
+            embedding_api_key
+            or get_api_key_for_provider(embedding_provider, for_embedding=True)
+        )
         self.provider_config = get_provider_config(self.provider)
         self.llm = self._init_llm()
         self.raw_client = self._init_raw_client()
@@ -296,17 +313,16 @@ class MedicalAgent:
         self._save_memory()
 
     def init_retriever(self) -> None:
-        embedding_api_key = self.api_key if self.provider == EMBEDDING_PROVIDER else ""
         self.medical_retriever = create_retriever(
-            embedding_provider=EMBEDDING_PROVIDER,
-            embedding_api_key=embedding_api_key,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
             knowledge_dir=MEDICAL_KNOWLEDGE_DIR,
             knowledge_base="medical",
             index_namespace="medical",
         )
         self.personal_retriever = create_retriever(
-            embedding_provider=EMBEDDING_PROVIDER,
-            embedding_api_key=embedding_api_key,
+            embedding_provider=self.embedding_provider,
+            embedding_api_key=self.embedding_api_key,
             knowledge_dir=PERSONAL_KNOWLEDGE_DIR,
             knowledge_base="personal",
             index_namespace="personal",
@@ -323,9 +339,9 @@ class MedicalAgent:
 
     def _active_retriever_error(self) -> str:
         errors = []
-        if self.medical_knowledge_enabled and self.medical_retriever_error:
+        if getattr(self, "medical_knowledge_enabled", True) and self.medical_retriever_error:
             errors.append(f"医疗知识库：{self.medical_retriever_error}")
-        if self.personal_knowledge_enabled and self.personal_retriever_error:
+        if getattr(self, "personal_knowledge_enabled", False) and self.personal_retriever_error:
             errors.append(f"个人信息库：{self.personal_retriever_error}")
         return "；".join(errors)
 
@@ -343,8 +359,20 @@ class MedicalAgent:
             docs = retriever.similarity_search(user_input, k=k)
             if not docs:
                 continue
+            chunk_lines = []
+            for doc in docs:
+                source_label = self._format_source_label(doc)
+                relevance_score = doc.metadata.get("relevance_score", "")
+                matched_terms = ", ".join(str(term) for term in doc.metadata.get("matched_terms", [])[:5])
+                evidence_header = f"[来源：{source_label}"
+                if relevance_score != "":
+                    evidence_header += f"｜相关性：{relevance_score}"
+                if matched_terms:
+                    evidence_header += f"｜命中：{matched_terms}"
+                evidence_header += "]"
+                chunk_lines.append(f"{evidence_header}\n{doc.page_content}")
             sections.append(
-                f"【{label}】\n" + "\n\n".join(doc.page_content for doc in docs)
+                f"【{label}】\n" + "\n\n".join(chunk_lines)
             )
             all_docs.extend(docs)
 
@@ -446,6 +474,17 @@ class MedicalAgent:
             )
         return answer
 
+    def _sanitize_model_output(self, text: str) -> str:
+        sanitized = str(text or "")
+        sanitized = HTML_THINK_BLOCK_PATTERN.sub("", sanitized)
+        sanitized = HTML_THINK_OPEN_PATTERN.sub("", sanitized)
+        sanitized = THINK_BLOCK_PATTERN.sub("", sanitized)
+        sanitized = THINK_OPEN_PATTERN.sub("", sanitized)
+        sanitized = re.sub(r"(?is)</think\s*>", "", sanitized)
+        sanitized = re.sub(r"(?is)&lt;/think\s*&gt;", "", sanitized)
+        sanitized = re.sub(r"\n{3,}", "\n\n", sanitized).strip()
+        return sanitized or "抱歉，模型没有返回可展示的答案。"
+
     def _sanitize_for_logging(self, text: str) -> str:
         if not APP_CONFIG["log_redact_questions"]:
             return text[: APP_CONFIG["log_question_max_chars"]]
@@ -478,10 +517,23 @@ class MedicalAgent:
         if not docs:
             return answer
 
+        evidence_lines: List[str] = []
         source_lines: List[str] = []
         seen = set()
+        seen_evidence = set()
         for doc in docs:
             label = self._format_source_label(doc)
+            matched_terms = doc.metadata.get("matched_terms", [])
+            relevance_score = doc.metadata.get("relevance_score", "")
+            if (relevance_score != "" or matched_terms) and label not in seen_evidence:
+                evidence_line = f"- {label}"
+                if relevance_score != "":
+                    evidence_line += f"：相关性 {relevance_score}"
+                if matched_terms:
+                    evidence_line += "，命中 " + "、".join(str(term) for term in matched_terms[:5])
+                evidence_lines.append(evidence_line)
+                seen_evidence.add(label)
+
             if label in seen:
                 continue
             seen.add(label)
@@ -494,7 +546,11 @@ class MedicalAgent:
         if not source_lines:
             return answer
 
-        return f"{str(answer).strip()}\n\n参考来源：\n" + "\n".join(source_lines)
+        sections = [str(answer).strip()]
+        if evidence_lines:
+            sections.append("回答依据：\n" + "\n".join(evidence_lines))
+        sections.append("参考来源：\n" + "\n".join(source_lines))
+        return "\n\n".join(sections)
 
     def _base_system_prompt(self) -> str:
         if self.provider == "minimax":
@@ -515,6 +571,10 @@ class MedicalAgent:
         extra_system_prompts: List[str] | None = None,
     ) -> str:
         sections = [self._base_system_prompt()]
+        sections.append(
+            "输出限制：不要输出 <think>...</think>、chain-of-thought、隐藏思考过程或逐步推理；"
+            "只输出用户可见的最终答案和必要依据。"
+        )
 
         for prompt in extra_system_prompts or []:
             if prompt and prompt.strip():
@@ -531,6 +591,10 @@ class MedicalAgent:
                 "以下是与用户问题相关的知识库补充内容。"
                 "你应先直接回答用户问题，再吸收这些信息进行补充。"
                 "如果使用了这些内容，请在回答中明确写出“根据知识库补充”。"
+                "只允许使用与用户问题主题、药品或疾病一致的片段；"
+                "如果片段中混有其他药品、其他疾病或明显无关内容，必须忽略，不能据此引用。"
+                "如果知识库证据不足，应明确说明未检索到足够相关证据，不要强行引用。"
+                "不要输出逐步推理或隐藏思考过程，只输出面向用户的简洁依据。"
                 "回答时不要过度简写，尽量给出完整且有条理的说明。\n\n"
                 f"知识库补充内容：\n{retrieved_context}"
             )
@@ -602,7 +666,7 @@ class MedicalAgent:
         payload = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "provider": self.provider,
-            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_provider": getattr(self, "embedding_provider", EMBEDDING_PROVIDER),
             "question_redacted": self._sanitize_for_logging(user_input),
             "answer_length": len(str(answer)),
             "retrieved_doc_count": len(docs),
@@ -689,6 +753,7 @@ class MedicalAgent:
         )
 
     def _record_turn(self, user_input: str, answer: str) -> None:
+        answer = self._sanitize_model_output(answer)
         self.conversation_history.append({"role": "user", "content": user_input})
         self.conversation_history.append({"role": "assistant", "content": answer})
         self._maybe_rollup_memory()
@@ -729,7 +794,7 @@ class MedicalAgent:
         try:
             messages = self._build_prompt(user_input, retrieved_context, extra_system_prompts)
             answer = self._append_risk_notice(
-                self._invoke_langchain_messages(messages),
+                self._sanitize_model_output(self._invoke_langchain_messages(messages)),
                 risk_assessment,
             )
             answer = self._append_sources(answer, docs)
@@ -768,7 +833,10 @@ class MedicalAgent:
                     retrieved_context,
                     extra_system_prompts,
                 )
-                answer = self._append_risk_notice(raw_answer, risk_assessment)
+                answer = self._append_risk_notice(
+                    self._sanitize_model_output(raw_answer),
+                    risk_assessment,
+                )
                 answer = self._append_sources(answer, docs)
                 self._record_turn(user_input, answer)
                 self._log_chat_event(
@@ -933,7 +1001,12 @@ class MedicalAgent:
             self._write_current_session_meta()
 
 
-def create_agent(provider: str = DEFAULT_PROVIDER, api_key: str = "") -> MedicalAgent:
-    agent = MedicalAgent(provider, api_key)
+def create_agent(
+    provider: str = DEFAULT_PROVIDER,
+    api_key: str = "",
+    embedding_provider: str = EMBEDDING_PROVIDER,
+    embedding_api_key: str = "",
+) -> MedicalAgent:
+    agent = MedicalAgent(provider, api_key, embedding_provider, embedding_api_key)
     agent.init_retriever()
     return agent

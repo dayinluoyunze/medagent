@@ -53,6 +53,53 @@ except ImportError:  # pragma: no cover
     jieba = None
 
 
+GENERIC_QUERY_TERMS = {
+    "什么",
+    "哪些",
+    "有哪些",
+    "有没有",
+    "是否",
+    "吗",
+    "怎么",
+    "怎么办",
+    "可以",
+    "能否",
+    "能不能",
+    "应该",
+    "需要",
+    "注意",
+    "注意事项",
+    "常见",
+    "通用",
+    "相关",
+    "问题",
+    "情况",
+    "处理",
+    "患者",
+    "用药",
+    "药物",
+    "药品",
+    "服药",
+    "服用",
+    "吃",
+    "使用",
+}
+
+GENERIC_EXPANSION_GROUPS: list[set[str]] = [
+    {"忘记", "漏服", "补服", "下次", "加倍"},
+    {"饭前", "饭后", "餐前", "餐后", "随餐", "空腹", "服药时间", "什么时候", "早晨", "夜间", "晚上"},
+    {"副作用", "不良反应", "不适", "反应", "风险"},
+    {"孕妇", "妊娠", "哺乳", "备孕"},
+    {"儿童", "孩子", "小孩"},
+    {"老人", "老年人", "老年"},
+    {"适合", "适应症", "用于", "人群", "病人"},
+    {"剂量", "一天", "几次", "每日", "一次", "用法用量", "起始剂量"},
+    {"饮酒", "酒精", "喝酒"},
+]
+
+GENERIC_INTENT_TERMS = set().union(*GENERIC_EXPANSION_GROUPS)
+
+
 class KnowledgeRetriever:
     """Loads local knowledge files and provides vector or keyword retrieval."""
 
@@ -118,6 +165,7 @@ class KnowledgeRetriever:
             base_url=config["api_base"],
             request_timeout=APP_CONFIG["request_timeout"],
             max_retries=APP_CONFIG["max_retries"],
+            model_kwargs=config.get("model_kwargs", {}),
         )
 
     def _knowledge_files(self) -> List[Path]:
@@ -348,12 +396,114 @@ class KnowledgeRetriever:
         return documents
 
     def _split_documents(self, documents: List[Document]) -> List[Document]:
+        section_documents: List[Document] = []
+        for document in documents:
+            section_documents.extend(self._split_document_by_markdown_sections(document))
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=500,
             chunk_overlap=50,
             separators=["\n## ", "\n### ", "\n\n", "\n", "。", "；", "，", " ", ""],
         )
-        return text_splitter.split_documents(documents)
+        chunks = text_splitter.split_documents(section_documents)
+        return [chunk for chunk in chunks if self._has_enough_body_text(chunk)]
+
+    def _has_enough_body_text(self, document: Document) -> bool:
+        body = re.sub(r"(?m)^#{1,6}\s+.*$", "", document.page_content)
+        body = re.sub(r"\s+", "", body)
+        return len(body) >= 8
+
+    def _split_document_by_markdown_sections(self, document: Document) -> List[Document]:
+        """Keep evidence chunks focused while preserving parent Markdown headings."""
+
+        file_type = str(document.metadata.get("file_type", "")).lower()
+        if file_type not in {".md", ".markdown", ".txt", ".text"}:
+            return [document]
+
+        lines = document.page_content.splitlines()
+        if not any(re.match(r"^#{1,6}\s+", line.strip()) for line in lines):
+            return [document]
+
+        sections: List[Document] = []
+        heading_stack: dict[int, str] = {}
+        body_lines: List[str] = []
+        aliases_by_heading = self._extract_markdown_heading_aliases(document.page_content)
+
+        def flush_section() -> None:
+            content_lines = [heading_stack[level] for level in sorted(heading_stack)]
+            content_lines.extend(body_lines)
+            content = "\n".join(line for line in content_lines if line.strip()).strip()
+            if not content:
+                return
+            metadata = dict(document.metadata)
+            metadata["section_headings"] = [
+                re.sub(r"^#{1,6}\s+", "", heading_stack[level]).strip()
+                for level in sorted(heading_stack)
+            ]
+            metadata["section"] = " > ".join(metadata["section_headings"])
+            aliases: list[str] = []
+            for heading in metadata["section_headings"]:
+                aliases.extend(aliases_by_heading.get(heading, []))
+            if aliases:
+                deduped_aliases = list(dict.fromkeys(aliases))
+                metadata["section_aliases"] = deduped_aliases
+                insert_at = len(content_lines)
+                content_lines.insert(insert_at, "别名：" + "、".join(deduped_aliases))
+                content = "\n".join(line for line in content_lines if line.strip()).strip()
+            sections.append(Document(page_content=content, metadata=metadata))
+
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+            if heading_match:
+                if body_lines:
+                    flush_section()
+                    body_lines = []
+                level = len(heading_match.group(1))
+                heading_stack = {
+                    existing_level: heading
+                    for existing_level, heading in heading_stack.items()
+                    if existing_level < level
+                }
+                heading_stack[level] = line.strip()
+                continue
+
+            if line.strip() == "---":
+                if body_lines:
+                    flush_section()
+                    body_lines = []
+                continue
+
+            body_lines.append(line)
+
+        if body_lines or heading_stack:
+            flush_section()
+
+        return sections or [document]
+
+    def _extract_markdown_heading_aliases(self, content: str) -> dict[str, list[str]]:
+        aliases_by_heading: dict[str, list[str]] = {}
+        current_h2 = ""
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            heading_match = re.match(r"^##\s+(.+)$", line)
+            if heading_match:
+                current_h2 = heading_match.group(1).strip()
+                aliases_by_heading.setdefault(current_h2, [])
+                continue
+            if not current_h2:
+                continue
+
+            alias_match = re.match(
+                r"^-\s*(?:\*\*)?(名称|别名|通用名|商品名|药品名|产品名|英文名)(?:\*\*)?\s*[:：]\s*(.+)$",
+                line,
+            )
+            if not alias_match:
+                continue
+            alias = re.sub(r"[*`]", "", alias_match.group(2)).strip()
+            if alias and alias not in aliases_by_heading[current_h2]:
+                aliases_by_heading[current_h2].append(alias)
+        return aliases_by_heading
 
     def _hash_files(self, files: Iterable[Path]) -> str:
         digest = hashlib.sha256()
@@ -374,6 +524,9 @@ class KnowledgeRetriever:
             "embedding_model": get_provider_config(
                 self.embedding_provider, for_embedding=True
             )["model"],
+            "embedding_model_kwargs": get_provider_config(
+                self.embedding_provider, for_embedding=True
+            ).get("model_kwargs", {}),
             "knowledge_base": self.knowledge_base,
             "knowledge_dir": str(self.knowledge_dir),
             "index_namespace": self.index_namespace,
@@ -386,7 +539,7 @@ class KnowledgeRetriever:
             "ocr_max_pages": APP_CONFIG["ocr_max_pages"],
             "knowledge_signature": self._hash_files(files),
             "file_count": len(files),
-            "loader_version": 7,
+            "loader_version": 9,
         }
 
     def _read_manifest(self) -> dict | None:
@@ -462,14 +615,26 @@ class KnowledgeRetriever:
             return []
 
         tokens: List[str] = []
+        tokens.extend(
+            token.strip().lower()
+            for token in re.findall(r"[\u4e00-\u9fff]{1,6}[A-Za-z0-9][A-Za-z0-9_-]*", normalized)
+            if token.strip()
+        )
         if jieba is not None:
             tokens.extend(
                 token.strip().lower()
                 for token in jieba.lcut(normalized)
                 if token.strip()
             )
+        else:
+            for span in re.findall(r"[\u4e00-\u9fff]+", normalized):
+                for size in range(2, min(len(span), 6) + 1):
+                    tokens.extend(span[index : index + size] for index in range(0, len(span) - size + 1))
 
-        regex_tokens = re.findall(r"[\u4e00-\u9fff]{1,8}|[A-Za-z0-9_-]+", normalized)
+        regex_pattern = r"[A-Za-z0-9_-]+"
+        if jieba is None:
+            regex_pattern = r"[\u4e00-\u9fff]{1,8}|[A-Za-z0-9_-]+"
+        regex_tokens = re.findall(regex_pattern, normalized)
         tokens.extend(regex_tokens)
 
         deduped: List[str] = []
@@ -504,6 +669,176 @@ class KnowledgeRetriever:
 
         return score
 
+    def _base_signal_terms(self, query: str) -> List[str]:
+        tokens = self._tokenize_query(query)
+        terms: List[str] = []
+        seen = set()
+
+        def add(term: str) -> None:
+            normalized = term.strip().lower()
+            if not normalized or normalized in seen or normalized in GENERIC_QUERY_TERMS:
+                return
+            if len(normalized) <= 1 and not re.match(r"[A-Za-z0-9]", normalized):
+                return
+            seen.add(normalized)
+            terms.append(normalized)
+
+        for token in tokens:
+            add(token)
+
+        return terms
+
+    def _signal_terms(self, query: str) -> List[str]:
+        terms = self._base_signal_terms(query)
+        seen = set(terms)
+
+        def add(term: str) -> None:
+            normalized = term.strip().lower()
+            if not normalized or normalized in seen or normalized in GENERIC_QUERY_TERMS:
+                return
+            if len(normalized) <= 1 and not re.match(r"[A-Za-z0-9]", normalized):
+                return
+            seen.add(normalized)
+            terms.append(normalized)
+
+        query_lower = query.lower()
+        for expansion_terms in GENERIC_EXPANSION_GROUPS:
+            if any(term.lower() in query_lower for term in expansion_terms):
+                for term in expansion_terms:
+                    add(term)
+
+        return terms
+
+    def _query_specific_terms(
+        self,
+        query: str,
+        base_terms: List[str] | None = None,
+    ) -> List[str]:
+        terms = base_terms if base_terms is not None else self._base_signal_terms(query)
+        return [
+            term
+            for term in terms
+            if term not in GENERIC_INTENT_TERMS and term not in GENERIC_QUERY_TERMS
+        ]
+
+    def _required_query_terms(
+        self,
+        query: str,
+        base_terms: List[str] | None = None,
+    ) -> List[str]:
+        query_specific_terms = self._query_specific_terms(query, base_terms)
+        required_terms: List[str] = []
+        for term in sorted(query_specific_terms, key=len, reverse=True):
+            if any(
+                term != kept
+                and term in kept
+                and re.search(r"[A-Za-z0-9]", kept)
+                for kept in required_terms
+            ):
+                continue
+            required_terms.append(term)
+        return required_terms
+
+    def _doc_search_text(self, doc: Document) -> str:
+        metadata_text = " ".join(
+            str(value)
+            for key, value in doc.metadata.items()
+            if key in {"source", "source_file", "source_title", "section", "section_aliases"}
+        )
+        return f"{doc.page_content}\n{metadata_text}".lower()
+
+    def _section_search_text(self, doc: Document) -> str:
+        values = [
+            doc.metadata.get("source_title", ""),
+            doc.metadata.get("section", ""),
+            doc.metadata.get("section_headings", ""),
+            doc.metadata.get("section_aliases", ""),
+        ]
+        return " ".join(str(value) for value in values).lower()
+
+    def _relevance_features(
+        self,
+        query: str,
+        doc: Document,
+        signal_terms: List[str] | None = None,
+    ) -> dict[str, float | int | bool | list[str]]:
+        terms = signal_terms if signal_terms is not None else self._signal_terms(query)
+        base_terms = self._base_signal_terms(query)
+        query_specific_terms = self._query_specific_terms(query, base_terms)
+        required_query_terms = self._required_query_terms(query, base_terms)
+        doc_text = self._doc_search_text(doc)
+        section_text = self._section_search_text(doc)
+        matched_terms = [term for term in terms if term in doc_text]
+        matched_base_terms = [term for term in base_terms if term in doc_text]
+        matched_query_specific_terms = [
+            term for term in query_specific_terms if term in doc_text
+        ]
+        matched_required_terms = [
+            term for term in required_query_terms if term in doc_text
+        ]
+        heading_matches = [term for term in terms if term in section_text]
+        keyword_score = self._keyword_score(query, doc_text, terms)
+        exact_query_match = bool(query.strip() and query.strip().lower() in doc_text)
+        score = float(keyword_score)
+        score += min(len(matched_terms), 8) * 1.0
+        score += min(len(matched_base_terms), 6) * 1.5
+        score += min(len(matched_query_specific_terms), 4) * 3.0
+        score += min(len(matched_required_terms), 4) * 2.0
+        score += min(len(heading_matches), 4) * 1.5
+        if exact_query_match:
+            score += 8.0
+        return {
+            "score": score,
+            "keyword_score": keyword_score,
+            "signal_overlap": len(matched_terms),
+            "matched_terms": matched_terms[:8],
+            "base_signal_overlap": len(matched_base_terms),
+            "query_specific_overlap": len(matched_query_specific_terms),
+            "required_query_overlap": len(matched_required_terms),
+            "heading_overlap": len(heading_matches),
+            "exact_query_match": exact_query_match,
+        }
+
+    def _passes_relevance_gate(
+        self,
+        query: str,
+        doc: Document,
+        signal_terms: List[str] | None = None,
+    ) -> bool:
+        features = self._relevance_features(query, doc, signal_terms)
+        terms = signal_terms if signal_terms is not None else self._signal_terms(query)
+        if not terms:
+            return True
+
+        required_query_terms = self._required_query_terms(query)
+        if required_query_terms and int(features["required_query_overlap"]) == 0:
+            return False
+
+        min_overlap = APP_CONFIG["retrieval_min_signal_overlap"]
+        if required_query_terms or len(terms) >= 4:
+            min_overlap = max(min_overlap, 2)
+        min_score = APP_CONFIG["retrieval_min_relevance_score"]
+        return (
+            int(features["signal_overlap"]) >= min_overlap
+            and float(features["score"]) >= min_score
+        )
+
+    def _annotate_relevance(
+        self,
+        query: str,
+        doc: Document,
+        signal_terms: List[str] | None = None,
+    ) -> Document:
+        features = self._relevance_features(query, doc, signal_terms)
+        metadata = dict(doc.metadata)
+        metadata["relevance_score"] = round(float(features["score"]), 4)
+        metadata["signal_overlap"] = int(features["signal_overlap"])
+        metadata["matched_terms"] = features["matched_terms"]
+        metadata["query_specific_overlap"] = int(features["query_specific_overlap"])
+        metadata["required_query_overlap"] = int(features["required_query_overlap"])
+        metadata["heading_overlap"] = int(features["heading_overlap"])
+        return Document(page_content=doc.page_content, metadata=metadata)
+
     def _build_excerpt(self, content: str, tokens: List[str]) -> str:
         flat_content = re.sub(r"\s+", " ", content).strip()
         if not flat_content:
@@ -532,12 +867,14 @@ class KnowledgeRetriever:
         retrieval_mode: str,
     ) -> List[Document]:
         tokens = self._tokenize_query(query)
+        signal_terms = self._signal_terms(query)
         decorated: List[Document] = []
         for doc in docs:
-            metadata = dict(doc.metadata)
+            annotated = self._annotate_relevance(query, doc, signal_terms)
+            metadata = dict(annotated.metadata)
             metadata["retrieval_mode"] = retrieval_mode
-            metadata["excerpt"] = self._build_excerpt(doc.page_content, tokens)
-            decorated.append(Document(page_content=doc.page_content, metadata=metadata))
+            metadata["excerpt"] = self._build_excerpt(annotated.page_content, tokens)
+            decorated.append(Document(page_content=annotated.page_content, metadata=metadata))
         return decorated
 
     def _merge_docs(
@@ -560,10 +897,11 @@ class KnowledgeRetriever:
         return merged
 
     def _doc_key(self, doc: Document) -> tuple[str, str, str]:
+        section = str(doc.metadata.get("section", ""))
         return (
             str(doc.metadata.get("source", "")),
             str(doc.metadata.get("source_file", "")),
-            doc.page_content[:200],
+            section or doc.page_content[:200],
         )
 
     def _rank_hybrid_docs(
@@ -574,59 +912,83 @@ class KnowledgeRetriever:
         *,
         k: int,
     ) -> List[Document]:
-        tokens = self._tokenize_query(query)
+        signal_terms = self._signal_terms(query)
         scores: dict[tuple[str, str, str], float] = {}
         docs: dict[tuple[str, str, str], Document] = {}
 
         for rank, doc in enumerate(vector_docs, start=1):
+            if not self._passes_relevance_gate(query, doc, signal_terms):
+                continue
             key = self._doc_key(doc)
             docs.setdefault(key, doc)
-            scores[key] = scores.get(key, 0.0) + 2.5 / rank
+            features = self._relevance_features(query, doc, signal_terms)
+            scores[key] = scores.get(key, 0.0) + 2.5 / rank + min(float(features["score"]) / 8.0, 6.0)
 
         for rank, doc in enumerate(keyword_docs, start=1):
+            if not self._passes_relevance_gate(query, doc, signal_terms):
+                continue
             key = self._doc_key(doc)
             docs.setdefault(key, doc)
-            content = doc.page_content.lower()
-            keyword_score = self._keyword_score(query, content, tokens)
-            scores[key] = scores.get(key, 0.0) + 1.8 / rank + min(keyword_score / 6.0, 8.0)
+            features = self._relevance_features(query, doc, signal_terms)
+            scores[key] = scores.get(key, 0.0) + 1.8 / rank + min(float(features["score"]) / 6.0, 8.0)
 
         ranked_keys = sorted(scores, key=lambda item: scores[item], reverse=True)
         ranked_docs: List[Document] = []
         for key in ranked_keys[:k]:
-            metadata = dict(docs[key].metadata)
+            annotated_doc = self._annotate_relevance(query, docs[key], signal_terms)
+            metadata = dict(annotated_doc.metadata)
             metadata["rerank_score"] = round(scores[key], 4)
-            ranked_docs.append(Document(page_content=docs[key].page_content, metadata=metadata))
+            ranked_docs.append(Document(page_content=annotated_doc.page_content, metadata=metadata))
         return ranked_docs
 
     def _keyword_search(self, query: str, k: int = 4) -> List[Document]:
         if not self.chunks:
             return []
 
-        tokens = self._tokenize_query(query)
-        if not tokens:
+        signal_terms = self._signal_terms(query)
+        if not signal_terms:
             return self.chunks[:k]
 
         scored_chunks = []
         for doc in self.chunks:
-            content = doc.page_content.lower()
-            score = self._keyword_score(query, content, tokens)
+            if not self._passes_relevance_gate(query, doc, signal_terms):
+                continue
+            features = self._relevance_features(query, doc, signal_terms)
+            score = float(features["score"])
 
             if score > 0:
                 scored_chunks.append((score, doc))
 
         scored_chunks.sort(key=lambda item: item[0], reverse=True)
-        return [doc for _, doc in scored_chunks[:k]]
+        selected_docs: List[Document] = []
+        seen = set()
+        for _, doc in scored_chunks:
+            key = self._doc_key(doc)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected_docs.append(doc)
+            if len(selected_docs) >= k:
+                break
+        return selected_docs
 
     def similarity_search(self, query: str, k: int = 4) -> List[Document]:
         retrieval_mode = APP_CONFIG["retrieval_mode"]
-        candidate_k = max(k * 3, k)
+        candidate_multiplier = max(APP_CONFIG["retrieval_candidate_multiplier"], 1)
+        candidate_k = max(k * candidate_multiplier, k)
         keyword_docs = self._keyword_search(query, k=candidate_k)
 
         if self.vectorstore is not None and retrieval_mode in {"auto", "vector", "hybrid"}:
             try:
                 vector_docs = self.vectorstore.similarity_search(query, k=candidate_k)
                 if retrieval_mode == "vector":
-                    return self._decorate_docs(query, vector_docs[:k], retrieval_mode="vector")
+                    signal_terms = self._signal_terms(query)
+                    gated_vector_docs = [
+                        doc
+                        for doc in vector_docs
+                        if self._passes_relevance_gate(query, doc, signal_terms)
+                    ]
+                    return self._decorate_docs(query, gated_vector_docs[:k], retrieval_mode="vector")
 
                 merged_docs = self._rank_hybrid_docs(query, vector_docs, keyword_docs, k=k)
                 mode = "hybrid_rerank" if keyword_docs else "vector"
